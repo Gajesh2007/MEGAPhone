@@ -51,7 +51,7 @@ MEGAPhone consists of three main components:
 
 1. Clone this repository:
    ```bash
-   git clone https://github.com/yourusername/MEGAPhone.git
+   git clone https://github.com/Gajesh2007/MEGAPhone.git
    cd MEGAPhone
    ```
 

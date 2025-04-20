@@ -2,7 +2,7 @@ import {
   createWalletClient, 
   createPublicClient, 
   custom,
-  parseAbiItem,
+  decodeEventLog,
   type WalletClient, 
   type Account,
   type Chain,
@@ -416,8 +416,40 @@ export async function listenToAudioBatches(
     
     console.log(`Listening to batches for channel: ${channelId}`);
     
-    // Parse the ABI for the Batch event
-    const batchEventAbi = parseAbiItem('event Batch(bytes32 channelId, uint32 seqStart, uint8 count, bytes frames)');
+    // Import ABI directly
+    const contractAbi = [
+      {
+        "type": "event",
+        "name": "Batch",
+        "inputs": [
+          {
+            "name": "channelId",
+            "type": "bytes32",
+            "indexed": true,
+            "internalType": "bytes32"
+          },
+          {
+            "name": "seqStart",
+            "type": "uint32",
+            "indexed": false,
+            "internalType": "uint32"
+          },
+          {
+            "name": "count",
+            "type": "uint8",
+            "indexed": false,
+            "internalType": "uint8"
+          },
+          {
+            "name": "payload",
+            "type": "bytes",
+            "indexed": false,
+            "internalType": "bytes"
+          }
+        ],
+        "anonymous": false
+      }
+    ];
     
     // Set up logs subscription
     const unwatch = wsClient.watchEvent({
@@ -430,29 +462,59 @@ export async function listenToAudioBatches(
               
               // Only process if it matches our channel
               if (eventChannelId === bytes32ChannelId) {
-                const data = log.data;
+                console.log(`Received log for channel: ${channelId}`);
                 
-                // Decode the event data
-                const frameCount = Number(BigInt(`0x${data.slice(66, 68)}`));
-                const seqStart = Number(BigInt(`0x${data.slice(2, 66)}`));
-                
-                // Extract the frames payload
-                const framesHex = `0x${data.slice(68)}`;
-                const framesBytes = new Uint8Array(
-                  Array.from({ length: Math.floor((framesHex.slice(2).length) / 2) }, (_, i) =>
-                    parseInt(framesHex.slice(2).substring(i * 2, i * 2 + 2), 16)
-                  )
-                );
-                
-                // Call the callback with the batch data
-                callback({
-                  channelId,
-                  seqStart,
-                  count: frameCount,
-                  payload: framesBytes,
-                  blockNumber: log.blockNumber || BigInt(0),
-                  transactionHash: log.transactionHash || '0x0',
+                // Decode the event data using the ABI
+                const decoded = decodeEventLog({
+                  abi: contractAbi,
+                  data: log.data,
+                  topics: log.topics,
+                  eventName: 'Batch'
                 });
+                
+                console.log('Decoded event data:', decoded);
+                
+                // Extract the values from the decoded data with proper type checking
+                if (decoded && decoded.args) {
+                  // Type assertion to access the args with proper unknown conversion
+                  const args = decoded.args as unknown as {
+                    channelId: string;
+                    seqStart: bigint;
+                    count: number;
+                    payload: Uint8Array | string;
+                  };
+                  
+                  const seqStart = Number(args.seqStart);
+                  const count = Number(args.count);
+                  const payloadData = args.payload;
+                  
+                  // Convert the payload to Uint8Array
+                  let framesBytes: Uint8Array;
+                  if (typeof payloadData === 'string') {
+                    // Handle string payload (hex string)
+                    const hexString = payloadData.startsWith('0x') ? payloadData.slice(2) : payloadData;
+                    framesBytes = new Uint8Array(
+                      Array.from({ length: Math.floor(hexString.length / 2) }, (_, i) => 
+                        parseInt(hexString.substring(i * 2, i * 2 + 2), 16)
+                      )
+                    );
+                  } else {
+                    // Already a Uint8Array
+                    framesBytes = payloadData;
+                  }
+                  
+                  // Call the callback with the batch data
+                  callback({
+                    channelId,
+                    seqStart,
+                    count,
+                    payload: framesBytes,
+                    blockNumber: log.blockNumber || BigInt(0),
+                    transactionHash: log.transactionHash || '0x0',
+                  });
+                } else {
+                  console.error('Failed to decode event data properly', decoded);
+                }
               }
             }
           } catch (error) {
@@ -460,7 +522,20 @@ export async function listenToAudioBatches(
           }
         }
       },
-      events: [batchEventAbi],
+      address: CONTRACT_ADDRESS,
+      event: {
+        type: 'event',
+        name: 'Batch',
+        inputs: [
+          { type: 'bytes32', name: 'channelId', indexed: true },
+          { type: 'uint32', name: 'seqStart', indexed: false },
+          { type: 'uint8', name: 'count', indexed: false },
+          { type: 'bytes', name: 'payload', indexed: false }
+        ]
+      },
+      args: {
+        channelId: bytes32ChannelId
+      }
     });
     
     return unwatch;
@@ -536,10 +611,7 @@ function encodeABISendBatch(
 function createHTTPClient() {
   return createPublicClient({
     chain: MEGA_ETH_CHAIN,
-    transport: http(),
-    batch: {
-      multicall: false
-    }
+    transport: http()
   });
 }
 
@@ -558,6 +630,14 @@ function createWSClient() {
         // Create WebSocket with null check for webSocket URL
         const wsUrl = MEGA_ETH_CHAIN.rpcUrls.default.webSocket?.[0] || 
                      'wss://carrot.megaeth.com/mafia/ws/20vd3cbmv2iwxxyi5x8kzef063q1ncjegg0ei27u';
+        
+        // For subscription methods, we need a persistent connection
+        if (method === 'eth_subscribe') {
+          // Return a wrapped subscription handler
+          return createWebSocketSubscription(wsUrl, jsonRPC);
+        }
+        
+        // For non-subscription methods, use a one-time request/response
         const ws = new WebSocket(wsUrl);
         
         // Wrap in a promise
@@ -598,6 +678,83 @@ function createWSClient() {
     transport: wsTransport,
   });
 }
+
+// Create a WebSocket subscription for real-time updates
+function createWebSocketSubscription(url: string, request: any): Promise<string> {
+  return new Promise((resolve, reject) => {
+    let subscriptionId: string = '';
+    const ws = new WebSocket(url);
+    
+    // Keep track of whether subscription was successfully established
+    let subscriptionEstablished = false;
+    
+    ws.onopen = () => {
+      console.log('WebSocket connection opened for subscription');
+      ws.send(JSON.stringify(request));
+    };
+    
+    ws.onmessage = (event) => {
+      try {
+        const data = JSON.parse(event.data);
+        
+        // Handle subscription confirmation
+        if (!subscriptionEstablished && data.result) {
+          subscriptionId = data.result;
+          subscriptionEstablished = true;
+          console.log(`Subscription established with ID: ${subscriptionId}`);
+          
+          // Return the subscription ID, but keep the connection open
+          resolve(subscriptionId);
+          return;
+        }
+        
+        // Handle subscription events
+        if (data.params?.subscription && data.method === 'eth_subscription') {
+          // Find the registered event handler for this subscription
+          const handler = subscriptionHandlers.get(data.params.subscription);
+          if (handler) {
+            handler(data.params.result);
+          }
+        }
+      } catch (error) {
+        console.error('Error processing WebSocket message:', error);
+      }
+    };
+    
+    ws.onerror = (error) => {
+      console.error('WebSocket subscription error:', error);
+      if (!subscriptionEstablished) {
+        reject(new Error('Failed to establish WebSocket subscription'));
+      }
+    };
+    
+    ws.onclose = () => {
+      console.log('WebSocket subscription closed');
+      // Remove the subscription handler when the connection closes
+      if (subscriptionId) {
+        subscriptionHandlers.delete(subscriptionId);
+      }
+    };
+    
+    // Store the WebSocket connection for later cleanup
+    if (activeSubscriptions.has(url)) {
+      // Close any existing connection for this URL
+      const existingWs = activeSubscriptions.get(url);
+      if (existingWs && existingWs.readyState !== WebSocket.CLOSED) {
+        existingWs.close();
+      }
+    }
+    
+    // Store the new connection
+    activeSubscriptions.set(url, ws);
+  });
+}
+
+// Store active WebSocket subscription connections
+const activeSubscriptions = new Map<string, WebSocket>();
+
+// Store subscription event handlers
+const subscriptionHandlers = new Map<string, (result: any) => void>();
 
 // Get transaction statistics and metrics
 export function getTransactionStats() {

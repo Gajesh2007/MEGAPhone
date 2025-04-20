@@ -332,6 +332,22 @@ export class AudioPlayer {
     while (this.frameMap.has(this.expectedSequence)) {
       // Mark as played and advance
       this.packetsPlayed++;
+      
+      // Actually play the frame if we have an audio context
+      if (this.audioContext && this.gainNode) {
+        try {
+          const frameData = this.frameMap.get(this.expectedSequence);
+          if (frameData) {
+            // Create an audio buffer from the frame data
+            // For a real implementation, this would use OpusDecoder
+            // Here we generate a simple tone as a placeholder
+            this.playSimpleTone(this.expectedSequence);
+          }
+        } catch (error) {
+          console.error('Error playing audio frame:', error);
+        }
+      }
+      
       this.frameMap.delete(this.expectedSequence);
       this.expectedSequence++;
     }
@@ -351,6 +367,27 @@ export class AudioPlayer {
       // In a real implementation, we would wait until we have enough frames
       console.debug(`Buffering: ${this.frameMap.size}/${jitterBufferFrames} frames (${this.jitterBufferMs}ms)`);
     }
+  }
+
+  /**
+   * Play a simple tone as a placeholder for audio playback
+   * @param frameSequence Sequence number of the frame
+   */
+  private playSimpleTone(frameSequence: number): void {
+    if (!this.audioContext || !this.gainNode) return;
+    
+    // Create an oscillator to generate a simple tone
+    const oscillator = this.audioContext.createOscillator();
+    oscillator.type = 'sine';
+    
+    // Vary frequency slightly based on sequence number to create more interesting sound
+    const baseFreq = 440; // A4 note
+    const freqVariation = (frameSequence % 10) * 20; // Vary by up to 200 Hz
+    oscillator.frequency.value = baseFreq + freqVariation;
+    
+    oscillator.connect(this.gainNode);
+    oscillator.start();
+    oscillator.stop(this.audioContext.currentTime + 0.02); // Play for 20ms
   }
 
   /**

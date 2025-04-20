@@ -115,7 +115,7 @@ interface PendingTransaction {
 }
 
 const pendingTransactions: PendingTransaction[] = [];
-const POLL_INTERVAL_MS = 25; // Poll every 25ms for ultra-low latency
+const POLL_INTERVAL_MS = 50; // Poll every 25ms for ultra-low latency
 let isPolling = false;
 
 // Start transaction receipt polling
@@ -536,7 +536,10 @@ function encodeABISendBatch(
 function createHTTPClient() {
   return createPublicClient({
     chain: MEGA_ETH_CHAIN,
-    transport: http()
+    transport: http(),
+    batch: {
+      multicall: false
+    }
   });
 }
 
@@ -552,8 +555,10 @@ function createWSClient() {
           params
         };
         
-        // Create WebSocket
-        const ws = new WebSocket(MEGA_ETH_CHAIN.rpcUrls.default.webSocket[0]);
+        // Create WebSocket with null check for webSocket URL
+        const wsUrl = MEGA_ETH_CHAIN.rpcUrls.default.webSocket?.[0] || 
+                     'wss://carrot.megaeth.com/mafia/ws/20vd3cbmv2iwxxyi5x8kzef063q1ncjegg0ei27u';
+        const ws = new WebSocket(wsUrl);
         
         // Wrap in a promise
         return new Promise((resolve, reject) => {
@@ -577,7 +582,7 @@ function createWSClient() {
             }
           };
           
-          ws.onerror = (event) => {
+          ws.onerror = () => {
             reject(new Error('WebSocket error'));
             ws.close();
           };

@@ -115,7 +115,7 @@ interface PendingTransaction {
 }
 
 const pendingTransactions: PendingTransaction[] = [];
-const POLL_INTERVAL_MS = 50; // Poll every 25ms for ultra-low latency
+const POLL_INTERVAL_MS = 20; // Poll every 20ms for ultra-low latency
 let isPolling = false;
 
 // Start transaction receipt polling
@@ -223,7 +223,7 @@ export async function sendAudioBatch(
   channelId: string,
   seqStart: number,
   frames: Uint8Array
-): Promise<{ hash: string }> {
+): Promise<{ hash: string; receipt?: any }> {
   try {
     // Start timing for transaction creation
     const creationStart = performance.now();
@@ -273,29 +273,46 @@ export async function sendAudioBatch(
     
     // Create hash from signed transaction
     let hash: `0x${string}`;
+    let receipt: any = null;
     
     // Track this transaction for metrics
     const txMetrics = {
       creationTime: signedAt - creationStart,
-      submissionTime: 0, // Will update this later if needed
+      submissionTime: 0,
       totalTime: performance.now() - creationStart
     };
     
-    // Fire-and-forget approach: send transaction without waiting
     try {
-      // Send transaction asynchronously but capture hash
-      hash = await sendRawTransaction(signedTx, 3, false);
+      // Use realtime_sendRawTransaction to get receipt directly without polling
+      console.log('Using realtime_sendRawTransaction for minimal latency');
+      const httpClient = createHTTPClient();
       
-      // Store metrics with the hash
+      // Send the transaction using realtime_sendRawTransaction
+      const startSubmit = performance.now();
+      
+      // Use custom transport request to call the realtime method
+      receipt = await (httpClient as any).transport.request({
+        method: 'realtime_sendRawTransaction',
+        params: [signedTx]
+      });
+      const endSubmit = performance.now();
+      
+      // Extract hash from receipt
+      hash = receipt.transactionHash as `0x${string}`;
+      
+      // Update metrics
+      txMetrics.submissionTime = endSubmit - startSubmit;
+      txMetrics.totalTime = endSubmit - creationStart;
       transactionMetrics[hash] = txMetrics;
       
-      // Start polling for receipt immediately
-      trackTransaction(hash, useNonce, 100); // Poll up to 100 times (2 seconds at 25ms polling)
+      console.log(`Transaction confirmed in ${Math.round(txMetrics.submissionTime)}ms with hash: ${hash.slice(0, 10)}...`);
       
-      return { hash };
-    } catch (error) {
-      console.error('Error sending transaction:', error);
-      throw error;
+      return { hash, receipt };
+    } catch (error: any) {
+      console.error('realtime_sendRawTransaction failed:', error);
+      
+      // Re-throw the error since we're no longer using fallback
+      throw new Error(`Failed to send transaction via realtime API: ${error?.message || 'Unknown error'}`);
     }
   } catch (error) {
     console.error('Error sending audio batch:', error);
@@ -303,8 +320,11 @@ export async function sendAudioBatch(
   }
 }
 
-// Continue using the existing sendRawTransaction for cases where wait is needed
-async function sendRawTransaction(
+/**
+ * Send a raw transaction to the blockchain and wait for the receipt
+ * @deprecated This function is kept for potential future use, but currently not used since we're using realtime_sendRawTransaction
+ */
+export async function sendRawTransaction(
   signedTx: `0x${string}`, 
   maxRetries = 3,
   waitForResponse = true
@@ -451,7 +471,7 @@ export async function listenToAudioBatches(
       }
     ];
     
-    // Set up logs subscription
+    // Set up logs subscription with explicit pending blocks for minimal latency
     const unwatch = wsClient.watchEvent({
       onLogs: (logs) => {
         for (const log of logs) {
@@ -536,9 +556,96 @@ export async function listenToAudioBatches(
       args: {
         channelId: bytes32ChannelId
       }
+      // Remove the fromBlock and toBlock parameters as they're not supported in this version of viem
     });
     
-    return unwatch;
+    // Also listen for mini-blocks (fragments) for ultra-low latency awareness
+    // This is optional but can provide more detailed metrics
+    let fragmentSubscriptionId: string | null = null;
+    
+    try {
+      const wsUrl = MEGA_ETH_CHAIN.rpcUrls.default.webSocket?.[0] || 
+                   'wss://carrot.megaeth.com/mafia/ws/20vd3cbmv2iwxxyi5x8kzef063q1ncjegg0ei27u';
+      const ws = new WebSocket(wsUrl);
+      
+      // Set up fragment subscription
+      ws.onopen = () => {
+        console.log('WebSocket connection opened for fragment subscription');
+        ws.send(JSON.stringify({
+          jsonrpc: '2.0',
+          id: Date.now(),
+          method: 'eth_subscribe',
+          params: ['fragment']
+        }));
+      };
+      
+      ws.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          
+          // Handle subscription confirmation
+          if (!fragmentSubscriptionId && data.result) {
+            fragmentSubscriptionId = data.result;
+            console.log(`Fragment subscription established with ID: ${fragmentSubscriptionId}`);
+            return;
+          }
+          
+          // Handle fragment notifications
+          if (data.params?.result && data.method === 'eth_subscription') {
+            const fragment = data.params.result;
+            const timestamp = typeof fragment.timestamp === 'string' ? 
+              BigInt(fragment.timestamp) : fragment.timestamp;
+            const gasUsed = typeof fragment.gas_used === 'string' ? 
+              BigInt(fragment.gas_used) : fragment.gas_used;
+              
+            console.log(`Received mini-block (fragment): timestamp=${timestamp}, gas_used=${gasUsed}, tx_count=${fragment.transactions?.length || 0}`);
+            
+            // You can do additional processing with the fragment data here if needed
+          }
+        } catch (error) {
+          console.error('Error processing WebSocket message:', error);
+        }
+      };
+      
+      ws.onerror = (error) => {
+        console.error('WebSocket fragment subscription error:', error);
+      };
+      
+      ws.onclose = () => {
+        console.log('WebSocket subscription closed');
+        // Remove the subscription handler when the connection closes
+        if (fragmentSubscriptionId) {
+          subscriptionHandlers.delete(fragmentSubscriptionId);
+        }
+      };
+      
+      // Store the WebSocket connection for later cleanup
+      if (activeSubscriptions.has(wsUrl)) {
+        // Close any existing connection for this URL
+        const existingWs = activeSubscriptions.get(wsUrl);
+        if (existingWs && existingWs.readyState !== WebSocket.CLOSED) {
+          existingWs.close();
+        }
+      }
+      
+      // Store the new connection
+      activeSubscriptions.set(wsUrl, ws);
+    } catch (error) {
+      console.error('Error setting up fragment subscription:', error);
+    }
+    
+    // Return a function that cleans up all subscriptions
+    return () => {
+      console.log('Cleaning up audio batch subscriptions');
+      unwatch();
+      
+      // Clean up fragment subscription if active
+      const fragmentWs = activeSubscriptions.get('fragment_' + channelId);
+      if (fragmentWs && fragmentWs.readyState !== WebSocket.CLOSED) {
+        fragmentWs.close();
+        activeSubscriptions.delete('fragment_' + channelId);
+      }
+    };
   } catch (error) {
     console.error('Error listening to audio batches:', error);
     throw error;

@@ -99,9 +99,9 @@ const Broadcaster: React.FC = () => {
       setStatusMessage(`Batch sent: ${hashString.slice(0, 6)}...${hashString.slice(-4)}`);
       
       // Refresh balance periodically (e.g., every 5 batches)
-      if (batchesSent % 5 === 0) {
-        refreshBalance();
-      }
+      // if (batchesSent % 5 === 0) {
+      //   refreshBalance();
+      // }
     } catch (error) {
       console.error('Error sending batch:', error);
       setStatusMessage(`Error: ${(error as Error).message}`);

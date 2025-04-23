@@ -5,38 +5,14 @@ import {
   decodeEventLog,
   type WalletClient, 
   type Account,
-  type Chain,
   http
 } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
 import { generatePrivateKey } from 'viem/accounts';
+import { megaethTestnet } from 'viem/chains';
 
-// MegaETH chain configuration
-export const MEGA_ETH_CHAIN: Chain = {
-  id: 6342,
-  name: 'MegaETH',
-  nativeCurrency: {
-    decimals: 18,
-    name: 'MEGA',
-    symbol: 'MEGA',
-  },
-  rpcUrls: {
-    default: {
-      http: ['https://carrot.megaeth.com/mafia/rpc/20vd3cbmv2iwxxyi5x8kzef063q1ncjegg0ei27u'],
-      webSocket: ['wss://carrot.megaeth.com/mafia/ws/20vd3cbmv2iwxxyi5x8kzef063q1ncjegg0ei27u'],
-    },
-    public: {
-      http: ['https://carrot.megaeth.com/mafia/rpc/20vd3cbmv2iwxxyi5x8kzef063q1ncjegg0ei27u'],
-      webSocket: ['wss://carrot.megaeth.com/mafia/ws/20vd3cbmv2iwxxyi5x8kzef063q1ncjegg0ei27u'],
-    },
-  },
-  blockExplorers: {
-    default: {
-      name: 'MegaETH Explorer',
-      url: 'https://megaexplorer.xyz',
-    },
-  },
-};
+
+const MEGA_ETH_WSS = 'wss://carrot.megaeth.com/mafia/ws/20vd3cbmv2iwxxyi5x8kzef063q1ncjegg0ei27u';
 
 // Contract address
 export const CONTRACT_ADDRESS = '0xF2A6dA0098eEa4A62802BB87A5447C987a39B5b9' as const;
@@ -57,7 +33,7 @@ export function createLocalWalletClient(): { walletClient: WalletClient; account
   // Create wallet client
   const walletClient = createWalletClient({
     account,
-    chain: MEGA_ETH_CHAIN,
+    chain: megaethTestnet,
     transport: http()
   });
   
@@ -257,18 +233,24 @@ export async function sendAudioBatch(
     
     // Get the transaction request
     const transactionRequest = {
+      chainId: megaethTestnet.id,
       to: CONTRACT_ADDRESS,
       account,
       data,
       nonce: useNonce,
       maxFeePerGas: 2500000n, // 0.0025 Gwei
       maxPriorityFeePerGas: 2000000n, // 0.002 Gwei
-      chain: MEGA_ETH_CHAIN, // Adding required chain parameter
+      chain: megaethTestnet, // Adding required chain parameter
       gas: 500000n, // Explicitly set gas limit to 500,000 units to avoid 'intrinsic gas too low' errors
     };
     
     // Sign the transaction
-    const signedTx = await walletClient.signTransaction(transactionRequest);
+    if (!walletClient.account || !walletClient.account.signTransaction) {
+      // 
+      throw new Error('invalid account.');
+    }
+
+    const signedTx = await walletClient.account.signTransaction!(transactionRequest);
     const signedAt = performance.now();
     
     // Create hash from signed transaction
@@ -291,10 +273,11 @@ export async function sendAudioBatch(
       const startSubmit = performance.now();
       
       // Use custom transport request to call the realtime method
-      receipt = await (httpClient as any).transport.request({
+      httpClient.request({
+        // @ts-expect-error 'unknown method'
         method: 'realtime_sendRawTransaction',
         params: [signedTx]
-      });
+      })
       const endSubmit = performance.now();
       
       // Extract hash from receipt
@@ -330,7 +313,6 @@ export async function sendRawTransaction(
   waitForResponse = true
 ): Promise<`0x${string}`> {
   return new Promise((resolve, reject) => {
-    let retryCount = 0;
     const initialBackoffMs = 100;
     
     const attemptRequest = (retryCount: number, backoffMs: number) => {
@@ -395,7 +377,7 @@ export async function sendRawTransaction(
       });
     };
     
-    attemptRequest(retryCount, initialBackoffMs);
+    attemptRequest(0, initialBackoffMs);
   });
 }
 
@@ -564,8 +546,7 @@ export async function listenToAudioBatches(
     let fragmentSubscriptionId: string | null = null;
     
     try {
-      const wsUrl = MEGA_ETH_CHAIN.rpcUrls.default.webSocket?.[0] || 
-                   'wss://carrot.megaeth.com/mafia/ws/20vd3cbmv2iwxxyi5x8kzef063q1ncjegg0ei27u';
+      const wsUrl = MEGA_ETH_WSS;
       const ws = new WebSocket(wsUrl);
       
       // Set up fragment subscription
@@ -717,7 +698,7 @@ function encodeABISendBatch(
 // Create HTTP client with standard transport
 function createHTTPClient() {
   return createPublicClient({
-    chain: MEGA_ETH_CHAIN,
+    chain: megaethTestnet,
     transport: http()
   });
 }
@@ -726,62 +707,57 @@ function createHTTPClient() {
 function createWSClient() {
   const wsTransport = custom({
     request: async ({ method, params }) => {
-      try {
-        const jsonRPC = {
-          jsonrpc: '2.0',
-          id: Date.now(),
-          method,
-          params
+      const jsonRPC = {
+        jsonrpc: '2.0',
+        id: Date.now(),
+        method,
+        params
+      };
+      
+      // Create WebSocket with null check for webSocket URL
+      const wsUrl = 'wss://carrot.megaeth.com/mafia/ws/20vd3cbmv2iwxxyi5x8kzef063q1ncjegg0ei27u';
+      
+      // For subscription methods, we need a persistent connection
+      if (method === 'eth_subscribe') {
+        // Return a wrapped subscription handler
+        return createWebSocketSubscription(wsUrl, jsonRPC);
+      }
+      
+      // For non-subscription methods, use a one-time request/response
+      const ws = new WebSocket(wsUrl);
+      
+      // Wrap in a promise
+      return new Promise((resolve, reject) => {
+        ws.onopen = () => {
+          // Send the request
+          ws.send(JSON.stringify(jsonRPC));
         };
         
-        // Create WebSocket with null check for webSocket URL
-        const wsUrl = MEGA_ETH_CHAIN.rpcUrls.default.webSocket?.[0] || 
-                     'wss://carrot.megaeth.com/mafia/ws/20vd3cbmv2iwxxyi5x8kzef063q1ncjegg0ei27u';
-        
-        // For subscription methods, we need a persistent connection
-        if (method === 'eth_subscribe') {
-          // Return a wrapped subscription handler
-          return createWebSocketSubscription(wsUrl, jsonRPC);
-        }
-        
-        // For non-subscription methods, use a one-time request/response
-        const ws = new WebSocket(wsUrl);
-        
-        // Wrap in a promise
-        return new Promise((resolve, reject) => {
-          ws.onopen = () => {
-            // Send the request
-            ws.send(JSON.stringify(jsonRPC));
-          };
-          
-          ws.onmessage = (event) => {
-            try {
-              const response = JSON.parse(event.data);
-              if (response.error) {
-                reject(new Error(response.error.message));
-              } else {
-                resolve(response.result);
-              }
-              ws.close();
-            } catch (e) {
-              reject(e);
-              ws.close();
+        ws.onmessage = (event) => {
+          try {
+            const response = JSON.parse(event.data);
+            if (response.error) {
+              reject(new Error(response.error.message));
+            } else {
+              resolve(response.result);
             }
-          };
-          
-          ws.onerror = () => {
-            reject(new Error('WebSocket error'));
             ws.close();
-          };
-        });
-      } catch (error) {
-        throw error;
-      }
+          } catch (e) {
+            reject(e);
+            ws.close();
+          }
+        };
+        
+        ws.onerror = () => {
+          reject(new Error('WebSocket error'));
+          ws.close();
+        };
+      });
     },
   });
 
   return createPublicClient({
-    chain: MEGA_ETH_CHAIN,
+    chain: megaethTestnet,
     transport: wsTransport,
   });
 }

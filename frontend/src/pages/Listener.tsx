@@ -1,10 +1,15 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { AudioPlayer, AudioPlayerOptions } from '../utils/audio';
 import { listenToAudioBatches } from '../utils/blockchain';
 import SignalStrength from '../components/SignalStrength';
+import { keccak256, stringToHex } from 'viem';
 
 const Listener: React.FC = () => {
   const [channelId, setChannelId] = useState<string>('hello-megaeth');
+  const onchainChannelId = useMemo(() => {
+    return keccak256(stringToHex(channelId))
+  }, [channelId]);
+
   const [isListening, setIsListening] = useState<boolean>(false);
   const [statusMessage, setStatusMessage] = useState<string>('');
   const [unsubscribe, setUnsubscribe] = useState<(() => void) | null>(null);
@@ -45,19 +50,12 @@ const Listener: React.FC = () => {
     };
   }, []);
   
-  // Apply jitter buffer size changes
   useEffect(() => {
     if (player) {
       player.setJitterBufferMs(jitterBufferMs);
-    }
-  }, [jitterBufferMs, player]);
-  
-  // Apply volume changes
-  useEffect(() => {
-    if (player) {
       player.setVolume(volume);
     }
-  }, [volume, player]);
+  }, [jitterBufferMs, player, volume]);
   
   // Handle audio batch from blockchain
   const handleAudioBatch = (batchData: {
@@ -74,8 +72,8 @@ const Listener: React.FC = () => {
         return;
       }
       
-      if (batchData.channelId !== channelId) {
-        console.warn(`Received batch for different channel: ${batchData.channelId} (we're listening to ${channelId})`);
+      if (batchData.channelId !== onchainChannelId) {
+        console.warn(`Received batch for different channel: ${batchData.channelId} (we're listening to ${onchainChannelId})`);
         return;
       }
       

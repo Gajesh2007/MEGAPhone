@@ -5,14 +5,19 @@ import {
   decodeEventLog,
   type WalletClient, 
   type Account,
-  http
+  http,
+  formatEther,
+  keccak256,
+  webSocket
 } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
 import { generatePrivateKey } from 'viem/accounts';
 import { megaethTestnet } from 'viem/chains';
 
+const USE_WSS = false;
 
-const MEGA_ETH_WSS = 'wss://carrot.megaeth.com/mafia/ws/20vd3cbmv2iwxxyi5x8kzef063q1ncjegg0ei27u';
+export const MEGA_ETH_WSS = 'wss://carrot.megaeth.com/mafia/ws/20vd3cbmv2iwxxyi5x8kzef063q1ncjegg0ei27u';
+export const DEFAULT_TRANSPORT = USE_WSS ? webSocket(MEGA_ETH_WSS) : http('https://carrot.megaeth.com/mafia/rpc/20vd3cbmv2iwxxyi5x8kzef063q1ncjegg0ei27u');
 
 // Contract address
 export const CONTRACT_ADDRESS = '0xF2A6dA0098eEa4A62802BB87A5447C987a39B5b9' as const;
@@ -34,36 +39,10 @@ export function createLocalWalletClient(): { walletClient: WalletClient; account
   const walletClient = createWalletClient({
     account,
     chain: megaethTestnet,
-    transport: http()
+    transport: DEFAULT_TRANSPORT
   });
   
   return { walletClient, account };
-}
-
-// Create a nonce tracker to manage nonces across multiple transactions
-let currentNonce: number | null = null;
-const NONCE_REFRESH_INTERVAL = 10; // Refresh nonce from chain every 10 transactions
-let transactionCount = 0; // Counter to track when to refresh the nonce
-
-// Function to synchronize nonce with blockchain
-async function refreshNonce(address: `0x${string}`): Promise<number> {
-  try {
-    console.log('Refreshing nonce from blockchain...');
-    const httpClient = createHTTPClient();
-    const nonce = await httpClient.getTransactionCount({
-      address,
-    });
-    
-    console.log(`Refreshed nonce: ${nonce}`);
-    currentNonce = nonce;
-    return nonce;
-  } catch (error) {
-    console.error('Error refreshing nonce:', error);
-    if (currentNonce !== null) {
-      return currentNonce;
-    }
-    throw error;
-  }
 }
 
 // Transaction performance metrics
@@ -91,104 +70,6 @@ interface PendingTransaction {
 }
 
 const pendingTransactions: PendingTransaction[] = [];
-const POLL_INTERVAL_MS = 20; // Poll every 20ms for ultra-low latency
-let isPolling = false;
-
-// Start transaction receipt polling
-function startTxPolling() {
-  if (!isPolling) {
-    isPolling = true;
-    pollPendingTransactions();
-  }
-}
-
-// Poll for transaction receipts - optimized for ultra-low latency
-async function pollPendingTransactions() {
-  if (pendingTransactions.length === 0) {
-    isPolling = false;
-    return;
-  }
-  
-  isPolling = true;
-  
-  // Make a shallow copy of pending transactions
-  const txsToPoll = [...pendingTransactions];
-  
-  // Poll each transaction in parallel
-  for (const pendingTx of txsToPoll) {
-    // Don't wait for the response, fire and forget
-    pollSingleTransaction(pendingTx).catch(err => {
-      console.error(`Error polling transaction ${pendingTx.hash.slice(0, 10)}...`, err);
-    });
-  }
-  
-  // Schedule next polling cycle regardless of current poll status
-  setTimeout(pollPendingTransactions, POLL_INTERVAL_MS);
-}
-
-// Poll a single transaction
-async function pollSingleTransaction(pendingTx: PendingTransaction): Promise<void> {
-  try {
-    const client = createHTTPClient();
-    const receipt = await client.getTransactionReceipt({ hash: pendingTx.hash });
-    
-    if (receipt) {
-      // Transaction confirmed
-      pendingTx.confirmedAt = performance.now();
-      
-      // Update confirmationTime in transactionMetrics if it exists
-      if (transactionMetrics[pendingTx.hash]) {
-        transactionMetrics[pendingTx.hash].confirmationTime = 
-          pendingTx.confirmedAt - pendingTx.sentAt;
-        transactionMetrics[pendingTx.hash].totalTime = 
-          pendingTx.confirmedAt - (transactionMetrics[pendingTx.hash].totalTime - pendingTx.sentAt);
-          
-        console.log(`Transaction ${pendingTx.hash.slice(0, 10)}... confirmed in ${Math.round(transactionMetrics[pendingTx.hash].confirmationTime || 0)}ms`);
-      }
-      
-      // Remove from pending transactions
-      const index = pendingTransactions.indexOf(pendingTx);
-      if (index !== -1) {
-        pendingTransactions.splice(index, 1);
-      }
-      
-      if (pendingTx.onConfirmed) {
-        pendingTx.onConfirmed();
-      }
-    } else {
-      // Transaction not yet confirmed, increment poll count
-      pendingTx.currentPoll += 1;
-      
-      if (pendingTx.currentPoll >= pendingTx.maxPolls) {
-        // Max polls exceeded
-        const index = pendingTransactions.indexOf(pendingTx);
-        if (index !== -1) {
-          pendingTransactions.splice(index, 1);
-        }
-        
-        if (pendingTx.onError) {
-          pendingTx.onError(new Error(`Transaction ${pendingTx.hash} not confirmed after ${pendingTx.maxPolls} polls`));
-        }
-      }
-    }
-  } catch (err) {
-    // Don't remove transaction on error, just increment poll count
-    pendingTx.currentPoll += 1;
-    
-    if (pendingTx.currentPoll >= pendingTx.maxPolls) {
-      const index = pendingTransactions.indexOf(pendingTx);
-      if (index !== -1) {
-        pendingTransactions.splice(index, 1);
-      }
-      
-      if (pendingTx.onError) {
-        pendingTx.onError(err instanceof Error ? err : new Error(String(err)));
-      }
-    }
-    
-    throw err;
-  }
-}
 
 /**
  * Send a batch of audio frames to the blockchain
@@ -197,35 +78,16 @@ export async function sendAudioBatch(
   walletClient: WalletClient,
   account: Account,
   channelId: string,
+  nonce: number,
   seqStart: number,
   frames: Uint8Array
 ): Promise<{ hash: string; receipt?: any }> {
   try {
     // Start timing for transaction creation
     const creationStart = performance.now();
-    
-    console.log(`Sending audio: channel=${channelId}, seqStart=${seqStart}, size=${frames.byteLength}B`);
-    
-    // Get the latest nonce for the account - only refresh if needed
-    if (currentNonce === null) {
-      await refreshNonce(account.address);
-      if (currentNonce === null) {
-        throw new Error('Failed to get nonce');
-      }
-    }
-    
-    // Local nonce management
-    const useNonce = currentNonce;
-    currentNonce++;
-    
-    // Periodically refresh nonce in the background (not blocking)
-    transactionCount++;
-    if (transactionCount >= NONCE_REFRESH_INTERVAL) {
-      refreshNonce(account.address).catch(err => {
-        console.error('Error refreshing nonce:', err);
-      });
-      transactionCount = 0;
-    }
+
+    // const framesHash = keccak256(frames);
+    // console.log(`Sending audio(${framesHash}): channel=${channelId}, seqStart=${seqStart}, size=${frames.byteLength}B, nonce=${nonce}`);
     
     // Encode the function call to the contract
     const channelIdBytes = stringToBytes32(channelId) as `0x${string}`;
@@ -237,7 +99,7 @@ export async function sendAudioBatch(
       to: CONTRACT_ADDRESS,
       account,
       data,
-      nonce: useNonce,
+      nonce: nonce,
       maxFeePerGas: 2500000n, // 0.0025 Gwei
       maxPriorityFeePerGas: 2000000n, // 0.002 Gwei
       chain: megaethTestnet, // Adding required chain parameter
@@ -255,7 +117,6 @@ export async function sendAudioBatch(
     
     // Create hash from signed transaction
     let hash: `0x${string}`;
-    let receipt: any = null;
     
     // Track this transaction for metrics
     const txMetrics = {
@@ -266,33 +127,35 @@ export async function sendAudioBatch(
     
     try {
       // Use realtime_sendRawTransaction to get receipt directly without polling
-      console.log('Using realtime_sendRawTransaction for minimal latency');
-      const httpClient = createHTTPClient();
+      const publicClient = createPublicClient({
+        chain: megaethTestnet,
+        transport: DEFAULT_TRANSPORT,
+      });
       
       // Send the transaction using realtime_sendRawTransaction
       const startSubmit = performance.now();
       
       // Use custom transport request to call the realtime method
-      httpClient.request({
+      const receipt = await publicClient.request({
         // @ts-expect-error 'unknown method'
         method: 'realtime_sendRawTransaction',
         params: [signedTx]
-      })
+      }) as {transactionHash: `0x${string}`} | undefined;
       const endSubmit = performance.now();
       
       // Extract hash from receipt
-      hash = receipt.transactionHash as `0x${string}`;
+      hash = receipt?.transactionHash as `0x${string}`;
       
       // Update metrics
       txMetrics.submissionTime = endSubmit - startSubmit;
       txMetrics.totalTime = endSubmit - creationStart;
       transactionMetrics[hash] = txMetrics;
       
-      console.log(`Transaction confirmed in ${Math.round(txMetrics.submissionTime)}ms with hash: ${hash.slice(0, 10)}...`);
+      // console.log(`Transaction confirmed in ${Math.round(txMetrics.submissionTime)}ms with hash: ${hash.slice(0, 10)}...`);
       
       return { hash, receipt };
     } catch (error: any) {
-      console.error('realtime_sendRawTransaction failed:', error);
+      console.error(`realtime_sendRawTransaction failed(${nonce}):`, error);
       
       // Re-throw the error since we're no longer using fallback
       throw new Error(`Failed to send transaction via realtime API: ${error?.message || 'Unknown error'}`);
@@ -304,94 +167,18 @@ export async function sendAudioBatch(
 }
 
 /**
- * Send a raw transaction to the blockchain and wait for the receipt
- * @deprecated This function is kept for potential future use, but currently not used since we're using realtime_sendRawTransaction
- */
-export async function sendRawTransaction(
-  signedTx: `0x${string}`, 
-  maxRetries = 3,
-  waitForResponse = true
-): Promise<`0x${string}`> {
-  return new Promise((resolve, reject) => {
-    const initialBackoffMs = 100;
-    
-    const attemptRequest = (retryCount: number, backoffMs: number) => {
-      const httpClient = createHTTPClient();
-      
-      const requestPromise = httpClient.request({
-        method: 'eth_sendRawTransaction',
-        params: [signedTx],
-      });
-      
-      // If we don't need to wait, resolve immediately with a synthetic hash
-      // The real hash will be available in the background
-      if (!waitForResponse) {
-        // Create a deterministic hash based on the signed transaction
-        // This is just a best-effort estimate, not the actual hash
-        const estimatedHash = `0x${signedTx.slice(8, 72)}` as `0x${string}`;
-        resolve(estimatedHash);
-        
-        // Continue processing in the background
-        requestPromise.then((realHash) => {
-          console.log(`Transaction sent: ${realHash.slice(0, 10)}...`);
-          
-          // If we have metrics for the estimated hash, move them to the real hash
-          if (transactionMetrics[estimatedHash]) {
-            transactionMetrics[realHash] = transactionMetrics[estimatedHash];
-            delete transactionMetrics[estimatedHash];
-          }
-          
-          // Update pending transaction hash if needed
-          const pendingTx = pendingTransactions.find(tx => tx.hash === estimatedHash);
-          if (pendingTx) {
-            pendingTx.hash = realHash;
-          }
-        }).catch(error => {
-          console.error('Error sending transaction:', error);
-        });
-        
-        return;
-      }
-      
-      // Normal blocking behavior
-      requestPromise.then(hash => {
-        resolve(hash);
-      }).catch(error => {
-        const errorMsg = error.message || '';
-        
-        if (errorMsg.includes('503') || 
-            errorMsg.includes('429') || 
-            errorMsg.includes('temporarily unavailable') ||
-            errorMsg.includes('intrinsic gas too low')) {  // Add specific handling for gas issues
-          if (retryCount < maxRetries) {
-            console.log(`Retrying (${retryCount + 1}/${maxRetries}) in ${backoffMs}ms...`);
-            setTimeout(() => attemptRequest(retryCount + 1, backoffMs * 2), backoffMs);
-          } else {
-            reject(new Error(`Max retries exceeded: ${errorMsg}`));
-          }
-        } else if (errorMsg.includes('nonce')) {
-          reject(new Error(`Nonce error: ${errorMsg}`));
-        } else {
-          reject(error);
-        }
-      });
-    };
-    
-    attemptRequest(0, initialBackoffMs);
-  });
-}
-
-/**
  * Get the account balance in ETH
  */
 export async function getAccountBalance(address: string): Promise<string> {
   try {
-    const client = createHTTPClient();
+    const client = createPublicClient({
+      chain: megaethTestnet,
+      transport: DEFAULT_TRANSPORT
+    });
     const balanceWei = await client.getBalance({
       address: address as `0x${string}`,
     });
-    const balanceEth = Number(balanceWei) / 1e18;
-    return balanceEth.toFixed(5);
+    return formatEther(balanceWei);
   } catch (error) {
     console.error('Error getting account balance:', error);
     throw error;
@@ -546,8 +333,7 @@ export async function listenToAudioBatches(
     let fragmentSubscriptionId: string | null = null;
     
     try {
-      const wsUrl = MEGA_ETH_WSS;
-      const ws = new WebSocket(wsUrl);
+      const ws = new WebSocket(MEGA_ETH_WSS);
       
       // Set up fragment subscription
       ws.onopen = () => {
@@ -601,16 +387,16 @@ export async function listenToAudioBatches(
       };
       
       // Store the WebSocket connection for later cleanup
-      if (activeSubscriptions.has(wsUrl)) {
+      if (activeSubscriptions.has(MEGA_ETH_WSS)) {
         // Close any existing connection for this URL
-        const existingWs = activeSubscriptions.get(wsUrl);
+        const existingWs = activeSubscriptions.get(MEGA_ETH_WSS);
         if (existingWs && existingWs.readyState !== WebSocket.CLOSED) {
           existingWs.close();
         }
       }
       
       // Store the new connection
-      activeSubscriptions.set(wsUrl, ws);
+      activeSubscriptions.set(MEGA_ETH_WSS, ws);
     } catch (error) {
       console.error('Error setting up fragment subscription:', error);
     }
@@ -695,14 +481,6 @@ function encodeABISendBatch(
   return encodedData as `0x${string}`;
 }
 
-// Create HTTP client with standard transport
-function createHTTPClient() {
-  return createPublicClient({
-    chain: megaethTestnet,
-    transport: http()
-  });
-}
-
 // Create WebSocket client
 function createWSClient() {
   const wsTransport = custom({
@@ -714,17 +492,14 @@ function createWSClient() {
         params
       };
       
-      // Create WebSocket with null check for webSocket URL
-      const wsUrl = 'wss://carrot.megaeth.com/mafia/ws/20vd3cbmv2iwxxyi5x8kzef063q1ncjegg0ei27u';
-      
       // For subscription methods, we need a persistent connection
       if (method === 'eth_subscribe') {
         // Return a wrapped subscription handler
-        return createWebSocketSubscription(wsUrl, jsonRPC);
+        return createWebSocketSubscription(MEGA_ETH_WSS, jsonRPC);
       }
       
       // For non-subscription methods, use a one-time request/response
-      const ws = new WebSocket(wsUrl);
+      const ws = new WebSocket(MEGA_ETH_WSS);
       
       // Wrap in a promise
       return new Promise((resolve, reject) => {
@@ -842,7 +617,7 @@ const subscriptionHandlers = new Map<string, (result: any) => void>();
 // Get transaction statistics and metrics
 export function getTransactionStats() {
   // Calculate metrics
-  let totalTxs = Object.keys(transactionMetrics).length;
+  const totalTxs = Object.keys(transactionMetrics).length;
   let totalCreationTime = 0;
   let totalSubmissionTime = 0;
   let totalConfirmationTime = 0;
@@ -882,28 +657,4 @@ export function getTransactionStats() {
         return acc;
       }, {} as Record<string, TransactionMetrics>)
   };
-}
-
-// Track a transaction for confirmation
-export function trackTransaction(
-  hash: `0x${string}`, 
-  nonce: number, 
-  maxPolls = 10, 
-  onConfirmed?: () => void, 
-  onError?: (error: Error) => void
-) {
-  pendingTransactions.push({
-    hash,
-    nonce,
-    timestamp: Date.now(),
-    maxPolls,
-    currentPoll: 0,
-    onConfirmed,
-    onError,
-    sentAt: performance.now(),
-  });
-  
-  if (!isPolling) {
-    startTxPolling();
-  }
 }

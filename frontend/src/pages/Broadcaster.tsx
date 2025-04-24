@@ -1,10 +1,13 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { OpusEncoder } from '../utils/audio';
-import { createLocalWalletClient, sendAudioBatch, getAccountBalance } from '../utils/blockchain';
-import type { Account, WalletClient } from 'viem';
+import { createLocalWalletClient, sendAudioBatch, getAccountBalance, DEFAULT_TRANSPORT } from '../utils/blockchain';
+import { createPublicClient, type Account, type WalletClient } from 'viem';
 import MetricsDashboard from '../components/MetricsDashboard';
+import { megaethTestnet } from 'viem/chains';
 
 const Broadcaster: React.FC = () => {
+  const nonce = useRef(0);
+  const [nonceReady, setNonceReady] = useState<boolean>(false);
   const [channelId, setChannelId] = useState<string>('');
   const [isRecording, setIsRecording] = useState<boolean>(false);
   const [statusMessage, setStatusMessage] = useState<string>('');
@@ -13,7 +16,7 @@ const Broadcaster: React.FC = () => {
   const [encoder, setEncoder] = useState<OpusEncoder | null>(null);
   const [walletClient, setWalletClient] = useState<WalletClient | null>(null);
   const [account, setAccount] = useState<Account | null>(null);
-  const [walletAddress, setWalletAddress] = useState<string>('');
+  const [walletAddress, setWalletAddress] = useState<`0x${string}` | undefined>();
   const [copySuccess, setCopySuccess] = useState<string>('');
   const [balance, setBalance] = useState<string>('0.00000');
   const [isRefreshing, setIsRefreshing] = useState<boolean>(false);
@@ -23,6 +26,18 @@ const Broadcaster: React.FC = () => {
   const [totalBytesTransmitted, setTotalBytesTransmitted] = useState<number>(0);
   const [blockTime, setBlockTime] = useState<number>(10); // Default 10ms for MegaETH
   const [realtimeLatency, setRealtimeLatency] = useState<number>(0);
+
+  useEffect(() => {
+    if (!walletAddress || nonceReady) {return;}
+
+    // refresh the current nonce if the wallet changes. do this once.
+    const client = createPublicClient({chain: megaethTestnet, transport: DEFAULT_TRANSPORT});
+    client.getTransactionCount({address: walletAddress, blockTag: 'pending'}).then(count => {
+      nonce.current = count;
+      setNonceReady(true);
+    });
+
+  }, [walletAddress, nonceReady, setNonceReady])
   
   // Initialize wallet client and audio encoder
   useEffect(() => {
@@ -75,10 +90,14 @@ const Broadcaster: React.FC = () => {
   // Handle audio data from the encoder
   const handleAudioData = async (buffer: { sequence: number; data: Uint8Array }) => {
     try {
-      if (!walletClient || !account || !channelId) return;
+      if (!walletClient || !account || !channelId || !nonceReady) return;
       
       const startTime = Date.now();
-      const result = await sendAudioBatch(walletClient, account, channelId, buffer.sequence, buffer.data);
+      // console.error(`sendAudioBatch(nonce=${nonce.current})`);
+      const p = sendAudioBatch(walletClient, account, channelId, nonce.current, buffer.sequence, buffer.data);
+      nonce.current++;
+      const result = await p;
+
       const endTime = Date.now();
       
       // Calculate transaction latency
@@ -231,6 +250,7 @@ const Broadcaster: React.FC = () => {
               Stop Broadcasting
             </button>
           ) : (
+            <>
             <button
               onClick={startBroadcasting}
               className="start-button"
@@ -238,6 +258,7 @@ const Broadcaster: React.FC = () => {
             >
               {parseFloat(balance) <= 0 ? 'Need Funds to Broadcast' : 'Start Broadcasting'}
             </button>
+          </>
           )}
         </div>
         

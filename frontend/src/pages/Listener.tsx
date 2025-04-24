@@ -1,10 +1,9 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { AudioPlayer, AudioPlayerOptions } from '../utils/audio';
 import { listenToAudioBatches } from '../utils/blockchain';
-import MetricsDashboard from '../components/MetricsDashboard';
 
 const Listener: React.FC = () => {
-  const [channelId, setChannelId] = useState<string>('');
+  const [channelId, setChannelId] = useState<string>('hello-megaeth');
   const [isListening, setIsListening] = useState<boolean>(false);
   const [statusMessage, setStatusMessage] = useState<string>('');
   const [unsubscribe, setUnsubscribe] = useState<(() => void) | null>(null);
@@ -17,9 +16,8 @@ const Listener: React.FC = () => {
   const [packetsLost, setPacketsLost] = useState<number>(0);
   
   // Metrics state
-  const [latencyHistory, setLatencyHistory] = useState<number[]>([]);
   const [totalBytesReceived, setTotalBytesReceived] = useState<number>(0);
-  const [blockTime, setBlockTime] = useState<number>(10); // Default 10ms for MegaETH
+  const [blockTime, setBlockTime] = useState<number>(10);
   const [realtimeLatency, setRealtimeLatency] = useState<number>(0);
   const [lastEventTime, setLastEventTime] = useState<number | null>(null);
   
@@ -80,7 +78,6 @@ const Listener: React.FC = () => {
       setPacketsReceived(prev => prev + batchData.count);
       setTotalBytesReceived(prev => prev + batchData.payload.length);
       if (txLatency > 0) {
-        setLatencyHistory(prev => [...prev, txLatency]);
         setRealtimeLatency(txLatency);
       }
       
@@ -94,8 +91,7 @@ const Listener: React.FC = () => {
         batchData.payload
       );
       
-      const seqEnd = batchData.seqStart + batchData.count - 1;
-      setStatusMessage(`Received batch: seq ${batchData.seqStart}-${seqEnd} (${batchData.count} frames)`);
+      setStatusMessage('LISTENING');
     } catch (error) {
       console.error('Error processing batch:', error);
       setStatusMessage(`Error: ${(error as Error).message}`);
@@ -104,14 +100,13 @@ const Listener: React.FC = () => {
   
   // Start listening
   const startListening = async () => {
-    if (!player || !channelId) {
-      setStatusMessage('Please enter a channel ID');
+    if (!player) {
+      setStatusMessage('Initializing...');
       return;
     }
     
     try {
       // Reset metrics
-      setLatencyHistory([]);
       setTotalBytesReceived(0);
       setPacketsReceived(0);
       setPacketsPlayed(0);
@@ -126,16 +121,11 @@ const Listener: React.FC = () => {
       setUnsubscribe(() => unsub);
       
       setIsListening(true);
-      setStatusMessage(`Listening to channel: ${channelId}`);
+      setStatusMessage('LISTENING');
       
       // Setup periodic stats update
       statsIntervalRef.current = window.setInterval(() => {
-        if (latencyHistory.length > 0) {
-          // Calculate average latency for last 10 frames
-          const recentLatencies = latencyHistory.slice(-10);
-          const avgLatency = recentLatencies.reduce((a, b) => a + b, 0) / recentLatencies.length;
-          setRealtimeLatency(Math.round(avgLatency));
-        }
+        // Keep stats updated periodically if needed
       }, 500);
     } catch (error) {
       setStatusMessage(`Error starting listener: ${(error as Error).message}`);
@@ -154,7 +144,7 @@ const Listener: React.FC = () => {
     }
     
     setIsListening(false);
-    setStatusMessage('Listening stopped');
+    setStatusMessage('Call Ended');
     
     // Clear stats interval
     if (statsIntervalRef.current) {
@@ -165,93 +155,38 @@ const Listener: React.FC = () => {
   
   return (
     <div className="listener-container">
-      <h1>MEGAPhone Listener</h1>
-      <p>Listen to on-chain voice broadcasts from MegaETH</p>
-      
-      <div className="listening-controls">
-        <div>
-          <label htmlFor="channel-id">Channel ID:</label>
-          <input
-            id="channel-id"
-            type="text"
-            value={channelId}
-            onChange={(e) => setChannelId(e.target.value)}
-            placeholder="Enter broadcaster's channel ID"
-            disabled={isListening}
-          />
-        </div>
-        
-        <div className="controls">
-          {isListening ? (
-            <button
-              onClick={stopListening}
-              className="stop-button"
-            >
-              Stop Listening
-            </button>
-          ) : (
-            <button
-              onClick={startListening}
-              className="start-button"
-              disabled={!channelId}
-            >
-              Start Listening
-            </button>
-          )}
-        </div>
-        
-        {player && (
-          <div className="audio-controls">
-            <div className="control-group">
-              <label htmlFor="jitter-buffer">Jitter Buffer: {jitterBufferMs}ms</label>
-              <input
-                id="jitter-buffer"
-                type="range"
-                min="10"
-                max="500"
-                step="10"
-                value={jitterBufferMs}
-                onChange={(e) => setJitterBufferMs(Number(e.target.value))}
-              />
-            </div>
-            
-            <div className="control-group">
-              <label htmlFor="volume">Volume: {Math.round(volume * 100)}%</label>
-              <input
-                id="volume"
-                type="range"
-                min="0"
-                max="1"
-                step="0.01"
-                value={volume}
-                onChange={(e) => setVolume(Number(e.target.value))}
-              />
-            </div>
-          </div>
+      <div className="call-button-container">
+        {isListening ? (
+          <button 
+            onClick={stopListening}
+            className="call-button decline-button"
+            aria-label="Decline call"
+          >
+            ✕
+          </button>
+        ) : (
+          <button
+            onClick={startListening}
+            className="call-button accept-button"
+            aria-label="Accept call"
+          >
+            ✓
+          </button>
         )}
-        
-        <div className="status">
-          <p>{statusMessage}</p>
-          {isListening && (
-            <>
-              <p>Packets received: {packetsReceived}</p>
-              <p>Packets played: {packetsPlayed}</p>
-              <p>Packets lost: {packetsLost}</p>
-              {lastSequence !== null && <p>Last sequence: {lastSequence}</p>}
-            </>
-          )}
-        </div>
       </div>
       
-      {/* Metrics Dashboard */}
-      <MetricsDashboard 
-        isActive={isListening}
-        latencyHistory={latencyHistory}
-        batchesSent={packetsReceived} // Reusing the same component
-        totalBytesTransmitted={totalBytesReceived} // Reusing the same component
-        lastBlockTime={blockTime}
-        realtimeLatency={realtimeLatency}
-      />
+      {isListening && (
+        <div className="status-indicator">
+          <div className="pulse"></div>
+          <span className="status-text">LISTENING</span>
+        </div>
+      )}
+      
+      <div className="stats-footer">
+        <span>Audio: <strong>{(totalBytesReceived / 1024).toFixed(2)} KB</strong></span>
+        <span>Latency: <strong>{realtimeLatency} ms</strong></span>
+        <span>Block Time: <strong>{blockTime} ms</strong></span>
+      </div>
     </div>
   );
 };

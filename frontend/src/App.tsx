@@ -8,33 +8,24 @@ function App() {
 
   return (
     <div className="megaphone-app">
-      <header>
-        <h1>MEGAPhone</h1>
-        <p>On-Chain Voice Broadcasting powered by MegaETH</p>
-        
-        <nav>
-          <button 
-            className={activePage === 'broadcaster' ? 'active' : ''}
-            onClick={() => setActivePage('broadcaster')}
-          >
-            Broadcaster
-          </button>
-          <button 
-            className={activePage === 'listener' ? 'active' : ''}
-            onClick={() => setActivePage('listener')}
-          >
-            Listener
-          </button>
-        </nav>
-      </header>
+      <div className="mode-toggle">
+        <button 
+          className={activePage === 'broadcaster' ? 'active' : ''}
+          onClick={() => setActivePage('broadcaster')}
+        >
+          Broadcast
+        </button>
+        <button 
+          className={activePage === 'listener' ? 'active' : ''}
+          onClick={() => setActivePage('listener')}
+        >
+          Listen
+        </button>
+      </div>
 
       <main>
         {activePage === 'broadcaster' ? <Broadcaster /> : <Listener />}
       </main>
-
-      <footer>
-        <p>MEGAPhone v0 - Fully On-Chain Voice Broadcasting Demo</p>
-      </footer>
     </div>
   )
 }

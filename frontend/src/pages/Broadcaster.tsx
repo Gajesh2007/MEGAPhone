@@ -2,17 +2,20 @@ import React, { useState, useEffect, useRef } from 'react';
 import { OpusEncoder } from '../utils/audio';
 import { createLocalWalletClient, sendAudioBatch, getAccountBalance, DEFAULT_TRANSPORT } from '../utils/blockchain';
 import { createPublicClient, type Account, type WalletClient } from 'viem';
-import MetricsDashboard from '../components/MetricsDashboard';
 import { megaethTestnet } from 'viem/chains';
+import AudioVisualizer from '../components/AudioVisualizer';
+import SignalStrength from '../components/SignalStrength';
 
 const Broadcaster: React.FC = () => {
   const nonce = useRef(0);
   const [nonceReady, setNonceReady] = useState<boolean>(false);
-  const [channelId, setChannelId] = useState<string>('');
+  const [channelId, setChannelId] = useState<string>('hello-megaeth');
   const [isRecording, setIsRecording] = useState<boolean>(false);
   const [statusMessage, setStatusMessage] = useState<string>('');
   const [batchesSent, setBatchesSent] = useState<number>(0);
   const [latency, setLatency] = useState<number | null>(null);
+  const [avgLatency, setAvgLatency] = useState<number | null>(null);
+  const latencyHistoryRef = useRef<number[]>([]);
   const [encoder, setEncoder] = useState<OpusEncoder | null>(null);
   const [walletClient, setWalletClient] = useState<WalletClient | null>(null);
   const [account, setAccount] = useState<Account | null>(null);
@@ -20,11 +23,11 @@ const Broadcaster: React.FC = () => {
   const [copySuccess, setCopySuccess] = useState<string>('');
   const [balance, setBalance] = useState<string>('0.00000');
   const [isRefreshing, setIsRefreshing] = useState<boolean>(false);
+  const [mediaStream, setMediaStream] = useState<MediaStream | null>(null);
   
   // Metrics state
-  const [latencyHistory, setLatencyHistory] = useState<number[]>([]);
   const [totalBytesTransmitted, setTotalBytesTransmitted] = useState<number>(0);
-  const [blockTime, setBlockTime] = useState<number>(10); // Default 10ms for MegaETH
+  const [blockTime, setBlockTime] = useState<number>(10);
   const [realtimeLatency, setRealtimeLatency] = useState<number>(0);
 
   useEffect(() => {
@@ -47,7 +50,7 @@ const Broadcaster: React.FC = () => {
       setWalletClient(client);
       setAccount(acc);
       setWalletAddress(acc.address);
-      setStatusMessage(`Created local wallet: ${acc.address.slice(0, 6)}...${acc.address.slice(-4)}`);
+      setStatusMessage(`Wallet ready: ${acc.address.slice(0, 6)}...${acc.address.slice(-4)}`);
       
       // Get initial balance
       fetchBalance(acc.address);
@@ -80,20 +83,12 @@ const Broadcaster: React.FC = () => {
     }
   };
   
-  // Refresh balance
-  const refreshBalance = () => {
-    if (walletAddress) {
-      fetchBalance(walletAddress);
-    }
-  };
-  
   // Handle audio data from the encoder
   const handleAudioData = async (buffer: { sequence: number; data: Uint8Array }) => {
     try {
       if (!walletClient || !account || !channelId || !nonceReady) return;
       
       const startTime = Date.now();
-      // console.error(`sendAudioBatch(nonce=${nonce.current})`);
       const p = sendAudioBatch(walletClient, account, channelId, nonce.current, buffer.sequence, buffer.data);
       nonce.current++;
       const result = await p;
@@ -106,9 +101,11 @@ const Broadcaster: React.FC = () => {
       // Update metrics
       setBatchesSent(prev => prev + 1);
       setLatency(txLatency);
-      setLatencyHistory(prev => [...prev, txLatency]);
       setTotalBytesTransmitted(prev => prev + buffer.data.length);
       setRealtimeLatency(txLatency);
+      
+      // Update latency history and calculate average
+      updateLatencyAverage(txLatency);
       
       // Latest block time (simulated, in real implementation we could get this from chain)
       setBlockTime(Math.floor(Math.random() * 3) + 8); // Random between 8-10ms for demo purposes
@@ -116,11 +113,6 @@ const Broadcaster: React.FC = () => {
       // Safely handle the hash (could be string or object)
       const hashString = result.hash || 'unknown-hash';
       setStatusMessage(`Batch sent: ${hashString.slice(0, 6)}...${hashString.slice(-4)}`);
-      
-      // Refresh balance periodically (e.g., every 5 batches)
-      // if (batchesSent % 5 === 0) {
-      //   refreshBalance();
-      // }
     } catch (error) {
       console.error('Error sending batch:', error);
       setStatusMessage(`Error: ${(error as Error).message}`);
@@ -129,8 +121,8 @@ const Broadcaster: React.FC = () => {
   
   // Start broadcasting
   const startBroadcasting = async () => {
-    if (!encoder || !account || !channelId) {
-      setStatusMessage('Please enter a channel ID');
+    if (!encoder || !account) {
+      setStatusMessage('Initializing...');
       return;
     }
     
@@ -142,14 +134,28 @@ const Broadcaster: React.FC = () => {
     
     try {
       // Reset metrics
-      setLatencyHistory([]);
       setTotalBytesTransmitted(0);
       setBatchesSent(0);
       setLatency(null);
+      setAvgLatency(null);
+      latencyHistoryRef.current = [];
+      
+      // Get microphone access for visualizer
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          channelCount: 1,
+          sampleRate: 48000,
+          echoCancellation: true,
+          noiseSuppression: true,
+        },
+        video: false,
+      });
+      
+      setMediaStream(stream);
       
       await encoder.start(handleAudioData);
       setIsRecording(true);
-      setStatusMessage('Broadcasting started');
+      setStatusMessage('LIVE');
     } catch (error) {
       setStatusMessage(`Error starting broadcast: ${(error as Error).message}`);
     }
@@ -160,19 +166,46 @@ const Broadcaster: React.FC = () => {
     if (encoder) {
       encoder.stop();
       setIsRecording(false);
-      setStatusMessage('Broadcasting stopped');
+      setStatusMessage('Call Ended');
+      
+      // Stop media stream for visualizer
+      if (mediaStream) {
+        mediaStream.getTracks().forEach(track => track.stop());
+        setMediaStream(null);
+      }
+      
+      // Reset latency metrics
+      setLatency(null);
+      setAvgLatency(null);
+      latencyHistoryRef.current = [];
+      
       // Refresh balance after stopping
-      refreshBalance();
+      fetchBalance(walletAddress || '');
     }
   };
 
+  // Keep track of latency history and calculate moving average
+  const updateLatencyAverage = (newLatency: number) => {
+    // Keep last 5 latency measurements for a moving average
+    const history = [...latencyHistoryRef.current, newLatency];
+    if (history.length > 5) {
+      history.shift(); // Remove oldest value when we have more than 5
+    }
+    latencyHistoryRef.current = history;
+    
+    // Calculate average latency
+    const sum = history.reduce((acc, val) => acc + val, 0);
+    const avg = Math.round(sum / history.length);
+    setAvgLatency(avg);
+  };
+  
   // Copy wallet address to clipboard
   const copyWalletAddress = async () => {
     if (walletAddress) {
       try {
         await navigator.clipboard.writeText(walletAddress);
         setCopySuccess('Copied!');
-        setTimeout(() => setCopySuccess(''), 2000); // Clear the "Copied!" message after 2 seconds
+        setTimeout(() => setCopySuccess(''), 2000);
       } catch (err) {
         setCopySuccess('Failed to copy');
         console.error('Failed to copy address: ', err);
@@ -182,106 +215,50 @@ const Broadcaster: React.FC = () => {
   
   return (
     <div className="broadcaster-container">
-      <h1>MEGAPhone Broadcaster</h1>
-      <p>Broadcast your voice on-chain using MegaETH's 10ms blocks</p>
+      {walletAddress && (
+        <div className="wallet-address" onClick={copyWalletAddress} title="Click to copy">
+          {copySuccess || `${walletAddress.slice(0, 6)}...${walletAddress.slice(-4)}`}
+        </div>
+      )}
       
-      <div className="wallet-section">
-        {walletAddress ? (
-          <div>
-            <div className="wallet-info">
-              <div className="wallet-address">
-                <p>Local wallet: <span className="address-text">{walletAddress.slice(0, 6)}...{walletAddress.slice(-4)}</span></p>
-              </div>
-              <div className="wallet-balance">
-                <p>
-                  Balance: <span className="balance-text">{balance} ETH</span>
-                  <button 
-                    onClick={refreshBalance} 
-                    className="refresh-button"
-                    disabled={isRefreshing}
-                    title="Refresh balance"
-                  >
-                    {isRefreshing ? '⟳' : '↻'}
-                  </button>
-                </p>
-              </div>
-            </div>
-            <div className="address-container">
-              <input 
-                type="text" 
-                value={walletAddress} 
-                readOnly 
-                className="address-input"
-              />
-              <button 
-                onClick={copyWalletAddress} 
-                className="copy-button"
-                title="Copy to clipboard"
-              >
-                {copySuccess || 'Copy Address'}
-              </button>
-            </div>
-            <p className="wallet-note">Send some MEGA testnet ETH to this address to fund your broadcasts.</p>
-          </div>
+      {/* Cell signal bars based on average latency */}
+      <SignalStrength latency={avgLatency} />
+      
+      <div className="call-button-container">
+        {isRecording ? (
+          <button 
+            onClick={stopBroadcasting}
+            className="call-button decline-button"
+            aria-label="Decline call"
+          >
+            ✕
+          </button>
         ) : (
-          <p>Creating local wallet...</p>
+          <button
+            onClick={startBroadcasting}
+            className="call-button accept-button"
+            disabled={!walletAddress || parseFloat(balance) <= 0}
+            aria-label="Accept call"
+          >
+            ✓
+          </button>
         )}
       </div>
       
-      <div className="broadcast-controls">
-        <div>
-          <label htmlFor="channel-id">Channel ID:</label>
-          <input
-            id="channel-id"
-            type="text"
-            value={channelId}
-            onChange={(e) => setChannelId(e.target.value)}
-            placeholder="Enter a unique channel identifier"
-            disabled={isRecording}
-          />
+      {isRecording && (
+        <div className="status-indicator">
+          <div className="pulse"></div>
+          <span className="status-text">BROADCASTING</span>
         </div>
-        
-        <div className="controls">
-          {isRecording ? (
-            <button 
-              onClick={stopBroadcasting}
-              className="stop-button"
-            >
-              Stop Broadcasting
-            </button>
-          ) : (
-            <>
-            <button
-              onClick={startBroadcasting}
-              className="start-button"
-              disabled={!walletAddress || !channelId || parseFloat(balance) <= 0}
-            >
-              {parseFloat(balance) <= 0 ? 'Need Funds to Broadcast' : 'Start Broadcasting'}
-            </button>
-          </>
-          )}
-        </div>
-        
-        <div className="status">
-          <p>{statusMessage}</p>
-          {isRecording && (
-            <>
-              <p>Batches sent: {batchesSent}</p>
-              {latency !== null && <p>Last batch latency: {latency}ms</p>}
-            </>
-          )}
-        </div>
-      </div>
+      )}
       
-      {/* Metrics Dashboard */}
-      <MetricsDashboard 
-        isActive={isRecording}
-        latencyHistory={latencyHistory}
-        batchesSent={batchesSent}
-        totalBytesTransmitted={totalBytesTransmitted}
-        lastBlockTime={blockTime}
-        realtimeLatency={realtimeLatency}
-      />
+      <AudioVisualizer mediaStream={mediaStream} isActive={isRecording} />
+      
+      <div className="stats-footer">
+        <span>Audio: <strong>{(totalBytesTransmitted / 1024).toFixed(2)} KB</strong></span>
+        <span>Latency: <strong>{realtimeLatency} ms</strong></span>
+        <span>Block Time: <strong>{blockTime} ms</strong></span>
+      </div>
     </div>
   );
 };

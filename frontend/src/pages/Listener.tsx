@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { AudioPlayer, AudioPlayerOptions } from '../utils/audio';
 import { listenToAudioBatches } from '../utils/blockchain';
+import SignalStrength from '../components/SignalStrength';
 
 const Listener: React.FC = () => {
   const [channelId, setChannelId] = useState<string>('hello-megaeth');
@@ -68,7 +69,17 @@ const Listener: React.FC = () => {
     transactionHash: string;
   }) => {
     try {
-      if (!player || batchData.channelId !== channelId) return;
+      if (!player) {
+        console.warn('Received audio batch but player is not initialized');
+        return;
+      }
+      
+      if (batchData.channelId !== channelId) {
+        console.warn(`Received batch for different channel: ${batchData.channelId} (we're listening to ${channelId})`);
+        return;
+      }
+      
+      console.log(`🎵 Received audio batch: seq=${batchData.seqStart}, count=${batchData.count}, size=${batchData.payload.length}B`);
       
       const now = Date.now();
       const txLatency = lastEventTime ? now - lastEventTime : 0;
@@ -101,11 +112,14 @@ const Listener: React.FC = () => {
   // Start listening
   const startListening = async () => {
     if (!player) {
+      console.error('Cannot start listening: Audio player not initialized');
       setStatusMessage('Initializing...');
       return;
     }
     
     try {
+      console.log(`Starting to listen on channel: ${channelId}`);
+      
       // Reset metrics
       setTotalBytesReceived(0);
       setPacketsReceived(0);
@@ -115,9 +129,12 @@ const Listener: React.FC = () => {
       
       // Initialize player
       await player.start();
+      console.log('Audio player started successfully');
       
       // Subscribe to audio batches
+      console.log(`Subscribing to audio batches on channel: ${channelId}`);
       const unsub = await listenToAudioBatches(channelId, handleAudioBatch);
+      console.log('Subscription to audio batches successful');
       setUnsubscribe(() => unsub);
       
       setIsListening(true);
@@ -125,9 +142,11 @@ const Listener: React.FC = () => {
       
       // Setup periodic stats update
       statsIntervalRef.current = window.setInterval(() => {
-        // Keep stats updated periodically if needed
-      }, 500);
+        // Output active state to console periodically
+        console.log(`Still listening on channel: ${channelId}, received: ${packetsReceived} packets`);
+      }, 5000);
     } catch (error) {
+      console.error('Error starting listener:', error);
       setStatusMessage(`Error starting listener: ${(error as Error).message}`);
     }
   };
@@ -155,6 +174,9 @@ const Listener: React.FC = () => {
   
   return (
     <div className="listener-container">
+      {/* Cell signal bars based on latency */}
+      <SignalStrength latency={realtimeLatency > 0 ? realtimeLatency : null} />
+      
       <div className="call-button-container">
         {isListening ? (
           <button 
@@ -183,9 +205,19 @@ const Listener: React.FC = () => {
       )}
       
       <div className="stats-footer">
-        <span>Audio: <strong>{(totalBytesReceived / 1024).toFixed(2)} KB</strong></span>
-        <span>Latency: <strong>{realtimeLatency} ms</strong></span>
-        <span>Block Time: <strong>{blockTime} ms</strong></span>
+        {/* Desktop view */}
+        <div className="desktop-view">
+          <span>Data <strong>{(totalBytesReceived / 1024).toFixed(2)} KB</strong></span>
+          <span>Latency <strong className={realtimeLatency > 200 ? 'high-latency' : ''}>{realtimeLatency}ms</strong></span>
+          <span>Block <strong>{blockTime}ms</strong></span>
+        </div>
+        
+        {/* Mobile view */}
+        <div className="mobile-view">
+          <span><strong>{(totalBytesReceived / 1024).toFixed(2)}kb</strong></span>
+          <span><strong className={realtimeLatency > 200 ? 'high-latency' : ''}>{realtimeLatency}ms</strong></span>
+          <span><strong>{blockTime}ms/b</strong></span>
+        </div>
       </div>
     </div>
   );

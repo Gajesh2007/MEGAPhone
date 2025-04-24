@@ -14,7 +14,7 @@ import { privateKeyToAccount } from 'viem/accounts';
 import { generatePrivateKey } from 'viem/accounts';
 import { megaethTestnet } from 'viem/chains';
 
-const USE_WSS = false;
+const USE_WSS = false; // Using HTTP instead since WebSocket endpoints are currently broken
 
 export const MEGA_ETH_WSS = 'wss://carrot.megaeth.com/mafia/ws/20vd3cbmv2iwxxyi5x8kzef063q1ncjegg0ei27u';
 export const DEFAULT_TRANSPORT = USE_WSS ? webSocket(MEGA_ETH_WSS) : http('https://carrot.megaeth.com/mafia/rpc/20vd3cbmv2iwxxyi5x8kzef063q1ncjegg0ei27u');
@@ -187,6 +187,7 @@ export async function getAccountBalance(address: string): Promise<string> {
 
 /**
  * Listen to audio batches for a specific channel
+ * Note: This implementation now uses polling rather than WebSockets due to WebSocket endpoints being broken
  */
 export async function listenToAudioBatches(
   channelId: string,
@@ -200,10 +201,15 @@ export async function listenToAudioBatches(
   }) => void
 ): Promise<() => void> {
   try {
-    const wsClient = createWSClient();
+    // Create an HTTP client instead of WebSocket
+    const client = createPublicClient({
+      chain: megaethTestnet,
+      transport: DEFAULT_TRANSPORT
+    });
+    
     const bytes32ChannelId = stringToBytes32(channelId);
     
-    console.log(`Listening to batches for channel: ${channelId}`);
+    console.log(`Listening to batches for channel: ${channelId} using HTTP polling`);
     
     // Import ABI directly
     const contractAbi = [
@@ -240,178 +246,132 @@ export async function listenToAudioBatches(
       }
     ];
     
-    // Set up logs subscription with explicit pending blocks for minimal latency
-    const unwatch = wsClient.watchEvent({
-      onLogs: (logs) => {
-        for (const log of logs) {
-          try {
-            // Check if log topics match our event
-            if (log.topics.length > 1) {
-              const eventChannelId = log.topics[1];
-              
-              // Only process if it matches our channel
-              if (eventChannelId === bytes32ChannelId) {
-                console.log(`Received log for channel: ${channelId}`);
-                
-                // Decode the event data using the ABI
-                const decoded = decodeEventLog({
-                  abi: contractAbi,
-                  data: log.data,
-                  topics: log.topics,
-                  eventName: 'Batch'
-                });
-                
-                console.log('Decoded event data:', decoded);
-                
-                // Extract the values from the decoded data with proper type checking
-                if (decoded && decoded.args) {
-                  // Type assertion to access the args with proper unknown conversion
-                  const args = decoded.args as unknown as {
-                    channelId: string;
-                    seqStart: bigint;
-                    count: number;
-                    payload: Uint8Array | string;
-                  };
-                  
-                  const seqStart = Number(args.seqStart);
-                  const count = Number(args.count);
-                  const payloadData = args.payload;
-                  
-                  // Convert the payload to Uint8Array
-                  let framesBytes: Uint8Array;
-                  if (typeof payloadData === 'string') {
-                    // Handle string payload (hex string)
-                    const hexString = payloadData.startsWith('0x') ? payloadData.slice(2) : payloadData;
-                    framesBytes = new Uint8Array(
-                      Array.from({ length: Math.floor(hexString.length / 2) }, (_, i) => 
-                        parseInt(hexString.substring(i * 2, i * 2 + 2), 16)
-                      )
-                    );
-                  } else {
-                    // Already a Uint8Array
-                    framesBytes = payloadData;
-                  }
-                  
-                  // Call the callback with the batch data
-                  callback({
-                    channelId,
-                    seqStart,
-                    count,
-                    payload: framesBytes,
-                    blockNumber: log.blockNumber || BigInt(0),
-                    transactionHash: log.transactionHash || '0x0',
-                  });
-                } else {
-                  console.error('Failed to decode event data properly', decoded);
-                }
-              }
-            }
-          } catch (error) {
-            console.error('Error processing log:', error);
-          }
-        }
-      },
-      address: CONTRACT_ADDRESS,
-      event: {
-        type: 'event',
-        name: 'Batch',
-        inputs: [
-          { type: 'bytes32', name: 'channelId', indexed: true },
-          { type: 'uint32', name: 'seqStart', indexed: false },
-          { type: 'uint8', name: 'count', indexed: false },
-          { type: 'bytes', name: 'payload', indexed: false }
-        ]
-      },
-      args: {
-        channelId: bytes32ChannelId
-      }
-      // Remove the fromBlock and toBlock parameters as they're not supported in this version of viem
-    });
-    
-    // Also listen for mini-blocks (fragments) for ultra-low latency awareness
-    // This is optional but can provide more detailed metrics
-    let fragmentSubscriptionId: string | null = null;
-    
-    try {
-      const ws = new WebSocket(MEGA_ETH_WSS);
-      
-      // Set up fragment subscription
-      ws.onopen = () => {
-        console.log('WebSocket connection opened for fragment subscription');
-        ws.send(JSON.stringify({
-          jsonrpc: '2.0',
-          id: Date.now(),
-          method: 'eth_subscribe',
-          params: ['fragment']
-        }));
-      };
-      
-      ws.onmessage = (event) => {
-        try {
-          const data = JSON.parse(event.data);
+        // Define a function to process logs
+    const processLog = (log: any) => {
+      try {
+        // Check if log topics match our event
+        if (log.topics && log.topics.length > 1) {
+          const eventChannelId = log.topics[1];
           
-          // Handle subscription confirmation
-          if (!fragmentSubscriptionId && data.result) {
-            fragmentSubscriptionId = data.result;
-            console.log(`Fragment subscription established with ID: ${fragmentSubscriptionId}`);
-            return;
-          }
-          
-          // Handle fragment notifications
-          if (data.params?.result && data.method === 'eth_subscription') {
-            const fragment = data.params.result;
-            const timestamp = typeof fragment.timestamp === 'string' ? 
-              BigInt(fragment.timestamp) : fragment.timestamp;
-            const gasUsed = typeof fragment.gas_used === 'string' ? 
-              BigInt(fragment.gas_used) : fragment.gas_used;
-              
-            console.log(`Received mini-block (fragment): timestamp=${timestamp}, gas_used=${gasUsed}, tx_count=${fragment.transactions?.length || 0}`);
+          // Only process if it matches our channel
+          if (eventChannelId === bytes32ChannelId) {
+            console.log(`Received log for channel: ${channelId}`);
             
-            // You can do additional processing with the fragment data here if needed
+            // Decode the event data using the ABI
+            const decoded = decodeEventLog({
+              abi: contractAbi,
+              data: log.data,
+              topics: log.topics,
+              eventName: 'Batch'
+            });
+            
+            console.log('Decoded event data:', decoded);
+            
+            // Extract the values from the decoded data with proper type checking
+            if (decoded && decoded.args) {
+              // Type assertion to access the args with proper unknown conversion
+              const args = decoded.args as unknown as {
+                channelId: string;
+                seqStart: bigint;
+                count: number;
+                payload: Uint8Array | string;
+              };
+              
+              const seqStart = Number(args.seqStart);
+              const count = Number(args.count);
+              const payloadData = args.payload;
+              
+              // Convert the payload to Uint8Array
+              let framesBytes: Uint8Array;
+              if (typeof payloadData === 'string') {
+                // Handle string payload (hex string)
+                const hexString = payloadData.startsWith('0x') ? payloadData.slice(2) : payloadData;
+                framesBytes = new Uint8Array(
+                  Array.from({ length: Math.floor(hexString.length / 2) }, (_, i) => 
+                    parseInt(hexString.substring(i * 2, i * 2 + 2), 16)
+                  )
+                );
+              } else {
+                // Already a Uint8Array
+                framesBytes = payloadData;
+              }
+              
+              // Call the callback with the batch data
+              callback({
+                channelId,
+                seqStart,
+                count,
+                payload: framesBytes,
+                blockNumber: log.blockNumber || BigInt(0),
+                transactionHash: log.transactionHash || '0x0',
+              });
+            } else {
+              console.error('Failed to decode event data properly', decoded);
+            }
           }
-        } catch (error) {
-          console.error('Error processing WebSocket message:', error);
         }
-      };
-      
-      ws.onerror = (error) => {
-        console.error('WebSocket fragment subscription error:', error);
-      };
-      
-      ws.onclose = () => {
-        console.log('WebSocket subscription closed');
-        // Remove the subscription handler when the connection closes
-        if (fragmentSubscriptionId) {
-          subscriptionHandlers.delete(fragmentSubscriptionId);
-        }
-      };
-      
-      // Store the WebSocket connection for later cleanup
-      if (activeSubscriptions.has(MEGA_ETH_WSS)) {
-        // Close any existing connection for this URL
-        const existingWs = activeSubscriptions.get(MEGA_ETH_WSS);
-        if (existingWs && existingWs.readyState !== WebSocket.CLOSED) {
-          existingWs.close();
-        }
+      } catch (error) {
+        console.error('Error processing log:', error);
       }
-      
-      // Store the new connection
-      activeSubscriptions.set(MEGA_ETH_WSS, ws);
-    } catch (error) {
-      console.error('Error setting up fragment subscription:', error);
-    }
+    };
+
+    // Get the current block number to use as a starting point
+    const currentBlock = await client.getBlockNumber();
+    console.log(`Starting to poll from block: ${currentBlock}`);
     
-    // Return a function that cleans up all subscriptions
-    return () => {
-      console.log('Cleaning up audio batch subscriptions');
-      unwatch();
-      
-      // Clean up fragment subscription if active
-      const fragmentWs = activeSubscriptions.get('fragment_' + channelId);
-      if (fragmentWs && fragmentWs.readyState !== WebSocket.CLOSED) {
-        fragmentWs.close();
-        activeSubscriptions.delete('fragment_' + channelId);
+    // Save the most recent block we've processed
+    let lastProcessedBlock = currentBlock;
+    
+    // Set up polling interval for new logs
+    const pollInterval = setInterval(async () => {
+      try {
+        // Get the current block number
+        const latestBlock = await client.getBlockNumber();
+        
+        // If there are no new blocks, skip this poll
+        if (latestBlock <= lastProcessedBlock) {
+          return;
+        }
+        
+        console.log(`Polling for logs: blocks ${lastProcessedBlock + 1n} to ${latestBlock}`);
+        
+        // Query logs for our event in the new block range
+        const logs = await client.getLogs({
+          address: CONTRACT_ADDRESS,
+          event: {
+            type: 'event',
+            name: 'Batch',
+            inputs: [
+              { type: 'bytes32', name: 'channelId', indexed: true },
+              { type: 'uint32', name: 'seqStart', indexed: false },
+              { type: 'uint8', name: 'count', indexed: false },
+              { type: 'bytes', name: 'payload', indexed: false }
+            ]
+          },
+          args: {
+            channelId: bytes32ChannelId
+          },
+          fromBlock: lastProcessedBlock + 1n,
+          toBlock: latestBlock
+        });
+        
+        // Process any logs found
+        if (logs.length > 0) {
+          console.log(`Found ${logs.length} new logs in blocks ${lastProcessedBlock + 1n} to ${latestBlock}`);
+          logs.forEach(processLog);
+        }
+        
+        // Update the last processed block
+        lastProcessedBlock = latestBlock;
+      } catch (error) {
+        console.error('Error polling for logs:', error);
       }
+    }, 1000); // Poll every 1 second
+    
+    // Return a function that cleans up the polling interval
+    return () => {
+      console.log('Stopping audio batch polling');
+      clearInterval(pollInterval);
     };
   } catch (error) {
     console.error('Error listening to audio batches:', error);
@@ -543,6 +503,29 @@ function createWebSocketSubscription(url: string, request: any): Promise<string>
     let subscriptionId: string = '';
     const ws = new WebSocket(url);
     
+    // Define the callback handler function
+    let onLogCallback: ((result: any) => void) | null = null;
+    
+    // Extract the callback from the watch parameters if available
+    if (request.method === 'eth_subscribe' && 
+        request.params && 
+        request.params[0] === 'logs' && 
+        request.params[1]?.onLogs) {
+      
+      // Extract the callback
+      onLogCallback = request.params[1].onLogs;
+      
+      // Create clean params object without the callback
+      const cleanParams = { ...request.params[1] };
+      delete cleanParams.onLogs;
+      
+      // Update request to use standard format without the callback
+      request = {
+        ...request,
+        params: [request.params[0], cleanParams]
+      };
+    }
+    
     // Keep track of whether subscription was successfully established
     let subscriptionEstablished = false;
     
@@ -561,6 +544,12 @@ function createWebSocketSubscription(url: string, request: any): Promise<string>
           subscriptionEstablished = true;
           console.log(`Subscription established with ID: ${subscriptionId}`);
           
+          // Register the callback if available
+          if (onLogCallback) {
+            console.log(`Registering handler for subscription ID: ${subscriptionId}`);
+            subscriptionHandlers.set(subscriptionId, onLogCallback);
+          }
+          
           // Return the subscription ID, but keep the connection open
           resolve(subscriptionId);
           return;
@@ -572,6 +561,31 @@ function createWebSocketSubscription(url: string, request: any): Promise<string>
           const handler = subscriptionHandlers.get(data.params.subscription);
           if (handler) {
             handler(data.params.result);
+          } else {
+            // Log missing handler
+            console.warn(`No handler found for subscription: ${data.params.subscription}`, data.params.result);
+            
+            // Register an on-the-fly handler for this subscription if possible
+            // This helps in case the subscription ID was not properly stored
+            if (request.method === 'eth_subscribe' && 
+                request.params && 
+                request.params[0] === 'logs' &&
+                data.params.result && 
+                data.params.result.topics && 
+                data.params.result.topics.length > 0) {
+              
+              // This is a logs subscription, attempt to handle it
+              console.log('Attempting to handle unregistered logs subscription');
+              
+              // Use all registered watchEvent handlers as fallbacks
+              subscriptionHandlers.forEach((existingHandler) => {
+                try {
+                  existingHandler(data.params.result);
+                } catch (err) {
+                  // Ignore errors in fallback handling
+                }
+              });
+            }
           }
         }
       } catch (error) {

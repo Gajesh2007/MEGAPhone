@@ -56,6 +56,9 @@ body {
   min-height: 100vh;
   position: relative;
   width: 100%;
+  /* Create space for footer on mobile */
+  padding-bottom: 60px;
+  box-sizing: border-box;
 }
 
 .wallet-address {
@@ -119,6 +122,16 @@ body {
   background-color: var(--danger-color);
 }
 
+.call-timer {
+  position: absolute;
+  top: calc(100% + 20px);
+  color: rgba(255, 255, 255, 0.7);
+  font-weight: 500;
+  font-size: 1.2rem;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.5px;
+}
+
 .channel-input {
   width: 80%;
   max-width: 300px;
@@ -137,26 +150,98 @@ body {
 }
 
 .stats-footer {
-  position: absolute;
-  bottom: 0;
+  position: fixed;
+  bottom: env(safe-area-inset-bottom, 0);
   left: 0;
   right: 0;
-  background-color: var(--card-bg);
   display: flex;
   justify-content: space-around;
-  padding: 0.75rem;
+  padding: 0.65rem;
   font-size: 0.75rem;
   color: rgba(255, 255, 255, 0.6);
   white-space: nowrap;
+  background-color: rgba(0, 0, 0, 0.5);
+  backdrop-filter: blur(5px);
+  z-index: 100;
 }
 
-.stats-footer span {
+.stats-footer {
+  display: block;
+}
+
+.desktop-view, .mobile-view {
+  display: flex;
+  justify-content: space-around;
+  width: 100%;
+}
+
+.desktop-view span, .mobile-view span {
   margin: 0 0.5rem;
+  display: flex;
+  align-items: center;
+}
+
+/* Hide mobile view by default (desktop) */
+.mobile-view {
+  display: none;
+}
+
+/* Mobile adjustments */
+@media (max-width: 480px) {
+  .broadcaster-container,
+  .listener-container {
+    padding-bottom: calc(60px + env(safe-area-inset-bottom, 0));
+  }
+  
+  .stats-footer {
+    padding: 0.5rem 0.3rem calc(0.5rem + env(safe-area-inset-bottom, 0)) 0.3rem;
+    font-size: 0.7rem;
+  }
+  
+  /* Switch views for mobile */
+  .desktop-view {
+    display: none;
+  }
+  
+  .mobile-view {
+    display: flex;
+    justify-content: space-between;
+  }
+  
+  .mobile-view span {
+    margin: 0 0.15rem;
+  }
+  
+  /* Smaller text size for mobile values */
+  .stats-footer strong {
+    font-size: 0.75rem;
+    letter-spacing: -0.2px;
+  }
+  
+  .call-button {
+    width: 80px;
+    height: 80px;
+  }
+  
+  .audio-visualizer {
+    width: 90%;
+    max-width: 300px;
+  }
+  
+  .wallet-address {
+    font-size: 0.7rem;
+    padding: 0.4rem;
+  }
 }
 
 .stats-footer strong {
   color: rgba(255, 255, 255, 0.9);
-  font-weight: 500;
+  font-weight: 600;
+  margin-left: 4px;
+}
+
+.stats-footer .high-latency {
+  color: var(--danger-color);
 }
 
 .status-indicator {

@@ -378,16 +378,43 @@ export class AudioPlayer {
     
     // Create an oscillator to generate a simple tone
     const oscillator = this.audioContext.createOscillator();
-    oscillator.type = 'sine';
     
-    // Vary frequency slightly based on sequence number to create more interesting sound
-    const baseFreq = 440; // A4 note
-    const freqVariation = (frameSequence % 10) * 20; // Vary by up to 200 Hz
+    // Use a more complex waveform for a richer sound
+    oscillator.type = 'square';
+    
+    // Create a biquad filter for a more voice-like sound
+    const filter = this.audioContext.createBiquadFilter();
+    filter.type = 'lowpass';
+    filter.frequency.value = 1200; // More like a voice
+    filter.Q.value = 1;
+    
+    // Vary frequency based on sequence data to simulate speech-like patterns
+    // Use a voice-like frequency range (roughly 85-255 Hz)
+    const baseFreq = 120; // Average human voice fundamental
+    const freqVariation = (frameSequence % 12) * 12; // Voice-like variation
     oscillator.frequency.value = baseFreq + freqVariation;
     
-    oscillator.connect(this.gainNode);
+    // Create a gain envelope for a smoother sound
+    const envelope = this.audioContext.createGain();
+    envelope.gain.value = 0;
+    
+    // Connect oscillator -> filter -> envelope -> main gain
+    oscillator.connect(filter);
+    filter.connect(envelope);
+    envelope.connect(this.gainNode);
+    
+    // Start the oscillator
     oscillator.start();
-    oscillator.stop(this.audioContext.currentTime + 0.02); // Play for 20ms
+    
+    // Apply envelope for smooth attack and release
+    const now = this.audioContext.currentTime;
+    envelope.gain.setValueAtTime(0, now);
+    envelope.gain.linearRampToValueAtTime(0.3, now + 0.002); // Fast attack
+    envelope.gain.linearRampToValueAtTime(0.2, now + 0.01);  // Slight decay
+    envelope.gain.linearRampToValueAtTime(0, now + 0.04);    // Release
+    
+    // Stop the oscillator after the envelope finishes
+    oscillator.stop(now + 0.05);
   }
 
   /**

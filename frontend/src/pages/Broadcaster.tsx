@@ -29,6 +29,8 @@ const Broadcaster: React.FC = () => {
   const [totalBytesTransmitted, setTotalBytesTransmitted] = useState<number>(0);
   const [blockTime, setBlockTime] = useState<number>(10);
   const [realtimeLatency, setRealtimeLatency] = useState<number>(0);
+  const [elapsedTime, setElapsedTime] = useState<number>(0);
+  const timerIntervalRef = useRef<number | null>(null);
 
   useEffect(() => {
     if (!walletAddress || nonceReady) {return;}
@@ -139,6 +141,7 @@ const Broadcaster: React.FC = () => {
       setLatency(null);
       setAvgLatency(null);
       latencyHistoryRef.current = [];
+      setElapsedTime(0);
       
       // Get microphone access for visualizer
       const stream = await navigator.mediaDevices.getUserMedia({
@@ -156,6 +159,13 @@ const Broadcaster: React.FC = () => {
       await encoder.start(handleAudioData);
       setIsRecording(true);
       setStatusMessage('LIVE');
+      
+      // Start the elapsed time timer
+      const startTime = Date.now();
+      timerIntervalRef.current = window.setInterval(() => {
+        const elapsed = Math.floor((Date.now() - startTime) / 1000);
+        setElapsedTime(elapsed);
+      }, 1000);
     } catch (error) {
       setStatusMessage(`Error starting broadcast: ${(error as Error).message}`);
     }
@@ -172,6 +182,12 @@ const Broadcaster: React.FC = () => {
       if (mediaStream) {
         mediaStream.getTracks().forEach(track => track.stop());
         setMediaStream(null);
+      }
+      
+      // Stop the elapsed time timer
+      if (timerIntervalRef.current) {
+        clearInterval(timerIntervalRef.current);
+        timerIntervalRef.current = null;
       }
       
       // Reset latency metrics
@@ -197,6 +213,13 @@ const Broadcaster: React.FC = () => {
     const sum = history.reduce((acc, val) => acc + val, 0);
     const avg = Math.round(sum / history.length);
     setAvgLatency(avg);
+  };
+  
+  // Format the elapsed time in MM:SS format
+  const formatElapsedTime = (seconds: number): string => {
+    const minutes = Math.floor(seconds / 60);
+    const remainingSeconds = seconds % 60;
+    return `${minutes.toString().padStart(2, '0')}:${remainingSeconds.toString().padStart(2, '0')}`;
   };
   
   // Copy wallet address to clipboard
@@ -226,13 +249,16 @@ const Broadcaster: React.FC = () => {
       
       <div className="call-button-container">
         {isRecording ? (
-          <button 
-            onClick={stopBroadcasting}
-            className="call-button decline-button"
-            aria-label="Decline call"
-          >
-            ✕
-          </button>
+          <>
+            <button 
+              onClick={stopBroadcasting}
+              className="call-button decline-button"
+              aria-label="Decline call"
+            >
+              ✕
+            </button>
+            <div className="call-timer">{formatElapsedTime(elapsedTime)}</div>
+          </>
         ) : (
           <button
             onClick={startBroadcasting}
@@ -255,9 +281,19 @@ const Broadcaster: React.FC = () => {
       <AudioVisualizer mediaStream={mediaStream} isActive={isRecording} />
       
       <div className="stats-footer">
-        <span>Audio: <strong>{(totalBytesTransmitted / 1024).toFixed(2)} KB</strong></span>
-        <span>Latency: <strong>{realtimeLatency} ms</strong></span>
-        <span>Block Time: <strong>{blockTime} ms</strong></span>
+        {/* Desktop view */}
+        <div className="desktop-view">
+          <span>Data <strong>{(totalBytesTransmitted / 1024).toFixed(2)} KB</strong></span>
+          <span>Latency <strong className={realtimeLatency > 200 ? 'high-latency' : ''}>{realtimeLatency}ms</strong></span>
+          <span>Block <strong>{blockTime}ms</strong></span>
+        </div>
+        
+        {/* Mobile view */}
+        <div className="mobile-view">
+          <span><strong>{(totalBytesTransmitted / 1024).toFixed(2)}kb</strong></span>
+          <span><strong className={realtimeLatency > 200 ? 'high-latency' : ''}>{realtimeLatency}ms</strong></span>
+          <span><strong>{blockTime}ms/b</strong></span>
+        </div>
       </div>
     </div>
   );

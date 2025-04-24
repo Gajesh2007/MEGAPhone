@@ -27,9 +27,6 @@ const Listener: React.FC = () => {
   const [realtimeLatency, setRealtimeLatency] = useState<number>(0);
   const [lastEventTime, setLastEventTime] = useState<number | null>(null);
   
-  // Stats interval
-  const statsIntervalRef = useRef<number | null>(null);
-  
   // Create audio player
   useEffect(() => {
     const playerOptions: AudioPlayerOptions = {
@@ -77,7 +74,7 @@ const Listener: React.FC = () => {
         return;
       }
       
-      console.log(`🎵 Received audio batch: seq=${batchData.seqStart}, count=${batchData.count}, size=${batchData.payload.length}B`);
+      // console.log(`🎵 Received audio batch: seq=${batchData.seqStart}, count=${batchData.count}, size=${batchData.payload.length}B`);
       
       const now = Date.now();
       const txLatency = lastEventTime ? now - lastEventTime : 0;
@@ -137,12 +134,6 @@ const Listener: React.FC = () => {
       
       setIsListening(true);
       setStatusMessage('LISTENING');
-      
-      // Setup periodic stats update
-      statsIntervalRef.current = window.setInterval(() => {
-        // Output active state to console periodically
-        console.log(`Still listening on channel: ${channelId}, received: ${packetsReceived} packets`);
-      }, 5000);
     } catch (error) {
       console.error('Error starting listener:', error);
       setStatusMessage(`Error starting listener: ${(error as Error).message}`);
@@ -162,12 +153,6 @@ const Listener: React.FC = () => {
     
     setIsListening(false);
     setStatusMessage('Call Ended');
-    
-    // Clear stats interval
-    if (statsIntervalRef.current) {
-      clearInterval(statsIntervalRef.current);
-      statsIntervalRef.current = null;
-    }
   };
   
   return (

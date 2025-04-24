@@ -7,6 +7,11 @@ export interface EncodedAudioBuffer {
 }
 
 /**
+ * 22050 kHz (often lazily called "22 kHz") has been a reasonably popular sample rate for low bit rate MP3s such as 64 kbps in years past. Audio quality is significantly affected, with higher frequency content missing. With the general rise in the availability of large file storage space and faster data links, 22 kHz is now of more limited use.
+ */
+const SAMPLE_RATE = 44_000; // 
+
+/**
  * Class to handle Opus encoding of microphone input
  */
 export class OpusEncoder {
@@ -39,7 +44,7 @@ export class OpusEncoder {
       this.mediaStream = await navigator.mediaDevices.getUserMedia({
         audio: {
           channelCount: 1,
-          sampleRate: 48000,
+          sampleRate: SAMPLE_RATE,
           echoCancellation: true,
           noiseSuppression: true,
         },
@@ -48,14 +53,14 @@ export class OpusEncoder {
       
       // Create audio context
       this.audioContext = new AudioContext({
-        sampleRate: 48000,
+        sampleRate: SAMPLE_RATE,
         latencyHint: 'interactive',
       });
       
       // Use MediaRecorder instead of AudioWorklet for better compatibility
       this.mediaRecorder = new MediaRecorder(this.mediaStream, {
-        mimeType: 'audio/webm;codecs=opus',
-        audioBitsPerSecond: 24000, // Opus typically works well at 24kbps for voice
+        mimeType: 'audio/webm;codecs=pcm',
+        audioBitsPerSecond: SAMPLE_RATE, // Opus typically works well at 24kbps for voice
       });
       
       // Collect data as it becomes available
@@ -169,9 +174,6 @@ export interface AudioPlayerOptions {
   }) => void;
 }
 
-/**
- * AudioPlayer class - handles decoding and playing Opus audio frames
- */
 export class AudioPlayer {
   private audioContext: AudioContext | null = null;
   private gainNode: GainNode | null = null;
@@ -181,6 +183,7 @@ export class AudioPlayer {
   private expectedSequence: number = 0;
   private isPlaying: boolean = false;
   private statsInterval: number | null = null;
+  private processingInterval: number | null = null;
   private packetsPlayed: number = 0;
   private packetsLost: number = 0;
   private options: AudioPlayerOptions;
@@ -198,7 +201,7 @@ export class AudioPlayer {
     try {
       // Create audio context with appropriate settings
       this.audioContext = new AudioContext({
-        sampleRate: 48000,
+        sampleRate: SAMPLE_RATE,
         latencyHint: 'interactive'
       });
 
@@ -214,6 +217,13 @@ export class AudioPlayer {
       this.gainNode = this.audioContext.createGain();
       this.gainNode.gain.value = this.volume;
       this.gainNode.connect(this.audioContext.destination);
+
+      // Start the frame processing interval - check for frames every 10ms
+      this.processingInterval = window.setInterval(() => {
+        if (this.isPlaying) {
+          this.processFrames();
+        }
+      }, 10);
 
       // Start stats reporting
       this.startStatsReporting();
@@ -237,6 +247,12 @@ export class AudioPlayer {
       this.statsInterval = null;
     }
 
+    // Stop frame processing
+    if (this.processingInterval) {
+      window.clearInterval(this.processingInterval);
+      this.processingInterval = null;
+    }
+
     // Cleanup audio context
     if (this.audioContext) {
       this.audioContext.close();
@@ -257,37 +273,51 @@ export class AudioPlayer {
    * @param payload Raw audio data
    */
   public processBatch(seqStart: number, count: number, payload: Uint8Array): void {
-    if (!this.isPlaying) return;
+    if (!this.isPlaying || !payload || payload.length === 0) return;
 
     try {
       // Frame size is fixed at 160 bytes for our Opus implementation
       const FRAME_SIZE = 160;
+      
+      // Validate payload size to ensure we have complete frames
+      const expectedSize = count * FRAME_SIZE;
+      if (payload.length < expectedSize) {
+        console.warn(`Invalid payload size: expected ${expectedSize} bytes, got ${payload.length}`);
+        count = Math.floor(payload.length / FRAME_SIZE); // Adjust count to match available data
+      }
 
       // Store frames in our jitter buffer map
       for (let i = 0; i < count; i++) {
         const sequence = seqStart + i;
         const offset = i * FRAME_SIZE;
-        const frameData = payload.slice(offset, offset + FRAME_SIZE);
         
-        // Add frame to buffer
-        this.frameMap.set(sequence, frameData);
-      }
-
-      // Clean up old frames (more than 2s of audio)
-      const oldestSequenceToKeep = this.expectedSequence - 100;
-      this.frameMap.forEach((_, seq) => {
-        if (seq < oldestSequenceToKeep) {
-          this.frameMap.delete(seq);
+        // Make sure we don't go beyond array bounds
+        if (offset + FRAME_SIZE <= payload.length) {
+          // Create a copy of the frame data to prevent reference issues
+          const frameData = new Uint8Array(payload.slice(offset, offset + FRAME_SIZE));
+          
+          // Add frame to buffer, only if we don't already have this sequence
+          // (avoid duplicates which could be caused by blockchain re-orgs)
+          if (!this.frameMap.has(sequence)) {
+            this.frameMap.set(sequence, frameData);
+          }
         }
-      });
-
-      // Process frames if we have any
-      this.processFrames();
-
-      // Report sequence number
-      if (this.options.onSequenceUpdate) {
-        this.options.onSequenceUpdate(seqStart + count - 1);
       }
+
+      // Process frames immediately to reduce latency
+      this.processFrames();
+      
+      // Update our sequence tracker
+      if (this.options.onSequenceUpdate && count > 0) {
+        const highestProcessedSeq = seqStart + (count - 1);
+        this.options.onSequenceUpdate(highestProcessedSeq);
+      }
+      
+      // Debug: Report buffer status
+      const bufferSize = this.frameMap.size;
+      const bufferTimeMs = bufferSize * 20; // 20ms per frame
+      console.debug(`Buffer status: ${bufferSize} frames (${bufferTimeMs}ms of audio)`);
+      
     } catch (error) {
       console.error('Error processing audio batch:', error);
     }
@@ -321,100 +351,136 @@ export class AudioPlayer {
    * Process frames from the jitter buffer at regular intervals
    */
   private processFrames(): void {
-    // In a real implementation, we would:
-    // 1. Check if we have frames in sequence
-    // 2. Check if we've waited long enough (jitter buffer)
-    // 3. Decode and play frames that are ready
-    // 4. Track missing frames
+    // If no frames in the buffer, nothing to do
+    if (this.frameMap.size === 0) return;
     
-    // For this demo, we simulate processing by just tracking 
-    // played vs. missed frames
+    // Calculate jitter buffer size in frames (20ms per frame)
+    const jitterBufferFrames = Math.ceil(this.jitterBufferMs / 20);
+    
+    // Get all available sequence numbers and sort them
+    const availableSeqs = Array.from(this.frameMap.keys()).sort((a, b) => a - b);
+    const lowestSeq = availableSeqs[0];
+    const highestSeq = availableSeqs[availableSeqs.length - 1];
+    
+    // Initialize expected sequence if it's the first frame
+    if (this.expectedSequence === 0 && lowestSeq > 0) {
+      this.expectedSequence = lowestSeq;
+    }
+    
+    // Buffer status logging (only in debug)
+    const bufferDepth = highestSeq - this.expectedSequence + 1;
+    if (bufferDepth < jitterBufferFrames) {
+      // Still buffering, waiting for more frames
+      console.debug(`Buffering: ${bufferDepth}/${jitterBufferFrames} frames (${this.jitterBufferMs}ms)`);
+      return;
+    }
+    
+    // Process frames that are ready to be played
     while (this.frameMap.has(this.expectedSequence)) {
-      // Mark as played and advance
-      this.packetsPlayed++;
+      // Get the frame data
+      const frameData = this.frameMap.get(this.expectedSequence);
       
-      // Actually play the frame if we have an audio context
-      if (this.audioContext && this.gainNode) {
+      // Play the audio if we have valid frame data and audio context
+      if (frameData && this.audioContext && this.gainNode) {
         try {
-          const frameData = this.frameMap.get(this.expectedSequence);
-          if (frameData) {
-            // Create an audio buffer from the frame data
-            // For a real implementation, this would use OpusDecoder
-            // Here we generate a simple tone as a placeholder
-            this.playSimpleTone(this.expectedSequence);
-          }
+          this.playAudioFrame(frameData);
+          this.packetsPlayed++;
         } catch (error) {
           console.error('Error playing audio frame:', error);
         }
       }
       
+      // Remove the frame from our buffer and advance sequence
       this.frameMap.delete(this.expectedSequence);
       this.expectedSequence++;
     }
     
-    // If we have frames ahead but missed some, count them as lost
-    const nextAvailableSeq = Array.from(this.frameMap.keys()).sort((a, b) => a - b)[0];
-    if (nextAvailableSeq && nextAvailableSeq > this.expectedSequence) {
-      const missedCount = nextAvailableSeq - this.expectedSequence;
+    // Handle packet loss: if we have frames ahead but missed some in between
+    const nextSeq = availableSeqs.find(seq => seq > this.expectedSequence);
+    if (nextSeq && nextSeq > this.expectedSequence) {
+      // We missed some frames, count them as lost
+      const missedCount = nextSeq - this.expectedSequence;
       this.packetsLost += missedCount;
-      this.expectedSequence = nextAvailableSeq;
+      
+      // For better audio continuity, we could insert "comfort noise" frames
+      // here in a full implementation, but for now we'll just advance
+      console.debug(`Missed ${missedCount} frames, skipping to sequence ${nextSeq}`);
+      
+      // Jump to the next available sequence
+      this.expectedSequence = nextSeq;
     }
     
-    // Apply jitter buffer wait time based on the configured MS value
-    // This is a simplified simulation for demo purposes
-    const jitterBufferFrames = Math.ceil(this.jitterBufferMs / 20); // 20ms per frame
-    if (this.frameMap.size < jitterBufferFrames && nextAvailableSeq) {
-      // In a real implementation, we would wait until we have enough frames
-      console.debug(`Buffering: ${this.frameMap.size}/${jitterBufferFrames} frames (${this.jitterBufferMs}ms)`);
-    }
+    // Clean up old frames (more than 2 seconds old)
+    const oldestFrameToKeep = this.expectedSequence - 100; // ~2 seconds at 20ms per frame
+    availableSeqs.forEach(seq => {
+      if (seq < oldestFrameToKeep) {
+        this.frameMap.delete(seq);
+      }
+    });
   }
 
   /**
-   * Play a simple tone as a placeholder for audio playback
-   * @param frameSequence Sequence number of the frame
+   * Play the actual audio frame data from the Opus-encoded stream
+   * @param frameData The audio frame data to play
    */
-  private playSimpleTone(frameSequence: number): void {
+  private playAudioFrame(frameData: Uint8Array): void {
     if (!this.audioContext || !this.gainNode) return;
     
-    // Create an oscillator to generate a simple tone
-    const oscillator = this.audioContext.createOscillator();
-    
-    // Use a more complex waveform for a richer sound
-    oscillator.type = 'square';
-    
-    // Create a biquad filter for a more voice-like sound
-    const filter = this.audioContext.createBiquadFilter();
-    filter.type = 'lowpass';
-    filter.frequency.value = 1200; // More like a voice
-    filter.Q.value = 1;
-    
-    // Vary frequency based on sequence data to simulate speech-like patterns
-    // Use a voice-like frequency range (roughly 85-255 Hz)
-    const baseFreq = 120; // Average human voice fundamental
-    const freqVariation = (frameSequence % 12) * 12; // Voice-like variation
-    oscillator.frequency.value = baseFreq + freqVariation;
-    
-    // Create a gain envelope for a smoother sound
-    const envelope = this.audioContext.createGain();
-    envelope.gain.value = 0;
-    
-    // Connect oscillator -> filter -> envelope -> main gain
-    oscillator.connect(filter);
-    filter.connect(envelope);
-    envelope.connect(this.gainNode);
-    
-    // Start the oscillator
-    oscillator.start();
-    
-    // Apply envelope for smooth attack and release
-    const now = this.audioContext.currentTime;
-    envelope.gain.setValueAtTime(0, now);
-    envelope.gain.linearRampToValueAtTime(0.3, now + 0.002); // Fast attack
-    envelope.gain.linearRampToValueAtTime(0.2, now + 0.01);  // Slight decay
-    envelope.gain.linearRampToValueAtTime(0, now + 0.04);    // Release
-    
-    // Stop the oscillator after the envelope finishes
-    oscillator.stop(now + 0.05);
+    try {
+      const audioCtx = this.audioContext;
+      
+      // Debug the incoming data to see what we're actually receiving
+      const isAllZeros = frameData.every(byte => byte === 0);
+      // const sum = frameData.reduce((acc, val) => acc + val, 0);
+      //const avg = sum / frameData.length;
+      const min = Math.min(...frameData);
+      const max = Math.max(...frameData);
+      
+      // If the data is all zeros or doesn't vary much, it's likely not valid audio
+      if (isAllZeros || (max - min < 5)) {
+        console.debug("Skipping silent or invalid frame");
+        return;
+      }
+      
+      try {
+        // If we have 160 bytes, and each 16-bit sample is 2 bytes, we have 80 samples
+        const numSamples = Math.floor(frameData.length / 2);
+        const audioBuffer = audioCtx.createBuffer(1, numSamples, SAMPLE_RATE);
+        const channelData = audioBuffer.getChannelData(0);
+        
+        // Convert byte pairs to 16-bit PCM samples
+        for (let i = 0; i < numSamples; i++) {
+          // Get the byte pair for this sample
+          const lsb = frameData[i * 2];
+          const msb = frameData[i * 2 + 1];
+          
+          // Combine them into a 16-bit value
+          // Little-endian: least significant byte first
+          const int16Sample = (msb << 8) | lsb;
+          
+          // Convert from 16-bit signed integer [-32768, 32767] to float [-1, 1]
+          channelData[i] = int16Sample / 32768;
+        }
+        
+        // Create the audio source
+        const source = audioCtx.createBufferSource();
+        source.buffer = audioBuffer;
+        
+        // Connect audio graph: source -> gain -> destination
+        source.connect(this.gainNode);
+        
+        // Play the audio
+        source.start();
+        console.debug("Playing audio using 16-bit PCM decoding");
+        
+        // Return early - we won't try the other methods
+        return;
+      } catch (pcm16Error) {
+        console.debug("16-bit PCM decoding failed, trying alternates:", pcm16Error);
+      }
+    } catch (error) {
+      console.error('Error playing audio frame:', error);
+    }
   }
 
   /**

@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { OpusEncoder } from '../utils/audio';
+import { OpusEncoder, type EncodedAudioBuffer, type AudioMetrics } from '../utils/audio';
 import { createLocalWalletClient, sendAudioBatch, getAccountBalance, DEFAULT_TRANSPORT } from '../utils/blockchain';
 import { createPublicClient, type Account, type WalletClient } from 'viem';
 import { megaethTestnet } from 'viem/chains';
@@ -27,7 +27,6 @@ const Broadcaster: React.FC = () => {
   
   // Metrics state
   const [totalBytesTransmitted, setTotalBytesTransmitted] = useState<number>(0);
-  const [blockTime, setBlockTime] = useState<number>(10);
   const [realtimeLatency, setRealtimeLatency] = useState<number>(0);
   const [elapsedTime, setElapsedTime] = useState<number>(0);
   const timerIntervalRef = useRef<number | null>(null);
@@ -48,14 +47,14 @@ const Broadcaster: React.FC = () => {
   useEffect(() => {
     // Create wallet client
     try {
-      const { walletClient: client, account: acc } = createLocalWalletClient();
+      const client = createLocalWalletClient();
       setWalletClient(client);
-      setAccount(acc);
-      setWalletAddress(acc.address);
-      setStatusMessage(`Wallet ready: ${acc.address.slice(0, 6)}...${acc.address.slice(-4)}`);
+      setAccount(client.account!);
+      setWalletAddress(client.account!.address);
+      setStatusMessage(`Wallet ready: ${client.account!.address.slice(0, 6)}...${client.account!.address.slice(-4)}`);
       
       // Get initial balance
-      fetchBalance(acc.address);
+      fetchBalance(client.account!.address);
     } catch (error) {
       console.error('Error creating wallet client:', error);
       setStatusMessage(`Error creating wallet: ${(error as Error).message}`);
@@ -85,40 +84,47 @@ const Broadcaster: React.FC = () => {
     }
   };
   
-  // Handle audio data from the encoder
-  const handleAudioData = async (buffer: { sequence: number; data: Uint8Array }) => {
-    try {
-      if (!walletClient || !account || !channelId || !nonceReady) return;
-      
-      const startTime = Date.now();
-      const p = sendAudioBatch(walletClient, account, channelId, nonce.current, buffer.sequence, buffer.data);
-      nonce.current++;
-      const result = await p;
-
-      const endTime = Date.now();
-      
-      // Calculate transaction latency
-      const txLatency = endTime - startTime;
-      
-      // Update metrics
-      setBatchesSent(prev => prev + 1);
-      setLatency(txLatency);
-      setTotalBytesTransmitted(prev => prev + buffer.data.length);
-      setRealtimeLatency(txLatency);
-      
-      // Update latency history and calculate average
-      updateLatencyAverage(txLatency);
-      
-      // Latest block time (simulated, in real implementation we could get this from chain)
-      setBlockTime(Math.floor(Math.random() * 3) + 8); // Random between 8-10ms for demo purposes
-      
-      // Safely handle the hash (could be string or object)
-      const hashString = result.hash || 'unknown-hash';
-      setStatusMessage(`Batch sent: ${hashString.slice(0, 6)}...${hashString.slice(-4)}`);
-    } catch (error) {
-      console.error('Error sending batch:', error);
-      setStatusMessage(`Error: ${(error as Error).message}`);
+  // Handle sending audio data to the blockchain
+  const sendAudioToBlockchain = async (buffer: EncodedAudioBuffer) => {
+    if (!walletClient || !account || !channelId || !nonceReady) {
+      throw new Error("Blockchain connection not ready");
     }
+    
+    const currentNonce = nonce.current++;
+    
+    try {
+      // Send the audio batch to the blockchain
+      const result = await sendAudioBatch(
+        walletClient, 
+        account, 
+        channelId, 
+        currentNonce, 
+        buffer.sequence, 
+        buffer.data
+      );
+      
+      // Update status message
+      const hashString = result.hash || 'unknown-hash';
+      setStatusMessage(`Batch ${buffer.sequence} sent: ${hashString.slice(0, 6)}...${hashString.slice(-4)}`);
+      
+      return result;
+    } catch (error) {
+      console.error(`Error sending batch (nonce: ${currentNonce}):`, error);
+      setStatusMessage(`Error: ${(error as Error).message}`);
+      throw error;
+    }
+  };
+  
+  // Handle metrics updates
+  const handleMetricsUpdate = (metrics: AudioMetrics) => {
+    // Update UI metrics
+    setBatchesSent(metrics.batchesSent);
+    setTotalBytesTransmitted(metrics.bytesTransmitted);
+    setRealtimeLatency(metrics.lastLatency);
+    setLatency(metrics.lastLatency);
+    
+    // Update latency history and average
+    updateLatencyAverage(metrics.lastLatency);
   };
   
   // Start broadcasting
@@ -156,7 +162,8 @@ const Broadcaster: React.FC = () => {
       
       setMediaStream(stream);
       
-      await encoder.start(handleAudioData);
+      // Start the encoder with our blockchain sender function and metrics callback
+      await encoder.start(sendAudioToBlockchain, handleMetricsUpdate);
       setIsRecording(true);
       setStatusMessage('LIVE');
       
@@ -284,15 +291,15 @@ const Broadcaster: React.FC = () => {
         {/* Desktop view */}
         <div className="desktop-view">
           <span>Data <strong>{(totalBytesTransmitted / 1024).toFixed(2)} KB</strong></span>
+          <span></span>
           <span>Latency <strong className={realtimeLatency > 200 ? 'high-latency' : ''}>{realtimeLatency}ms</strong></span>
-          <span>Block <strong>{blockTime}ms</strong></span>
         </div>
         
         {/* Mobile view */}
         <div className="mobile-view">
           <span><strong>{(totalBytesTransmitted / 1024).toFixed(2)}kb</strong></span>
+          <span></span>
           <span><strong className={realtimeLatency > 200 ? 'high-latency' : ''}>{realtimeLatency}ms</strong></span>
-          <span><strong>{blockTime}ms/b</strong></span>
         </div>
       </div>
     </div>

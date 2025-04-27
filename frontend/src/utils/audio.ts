@@ -7,24 +7,49 @@ export interface EncodedAudioBuffer {
 }
 
 /**
+ * Interface for metrics callback
+ */
+export interface AudioMetrics {
+  batchesSent: number;
+  bytesTransmitted: number;
+  lastLatency: number;
+}
+
+/**
  * 22050 kHz (often lazily called "22 kHz") has been a reasonably popular sample rate for low bit rate MP3s such as 64 kbps in years past. Audio quality is significantly affected, with higher frequency content missing. With the general rise in the availability of large file storage space and faster data links, 22 kHz is now of more limited use.
  */
 const SAMPLE_RATE = 44_000; // 
 
 /**
- * Class to handle Opus encoding of microphone input
+ * Enhanced OpusEncoder class with frame batching capability
+ * Posts transactions in batches every 30ms
  */
 export class OpusEncoder {
   private mediaStream: MediaStream | null = null;
   private audioContext: AudioContext | null = null;
   private mediaRecorder: MediaRecorder | null = null;
   private sequence: number = 0;
-  private callback: ((buffer: EncodedAudioBuffer) => void) | null = null;
+  
+  // Blockchain transaction function
+  private sendFunction: ((buffer: EncodedAudioBuffer) => Promise<any>) | null = null;
+  
+  // Metrics callback function
+  private metricsCallback: ((metrics: AudioMetrics) => void) | null = null;
+  
+  // State
   private isRecording: boolean = false;
   private frameInterval: number = 20; // 20ms per frame
+  private batchInterval: number = 30; // 30ms between transaction posts
   private frameSize: number = 160; // bytes per frame
   private processingInterval: number | null = null;
+  private batchingInterval: number | null = null;
   private audioChunks: Uint8Array[] = [];
+  private frameQueue: EncodedAudioBuffer[] = []; // Queue to hold frames between batch transmissions
+  
+  // Metrics
+  private totalBatchesSent: number = 0;
+  private totalBytesTransmitted: number = 0;
+  private lastLatency: number = 0;
   
   constructor() {
     console.log('OpusEncoder initialized');
@@ -32,13 +57,24 @@ export class OpusEncoder {
   
   /**
    * Start recording and encoding audio
-   * @param callback Function to call with encoded audio data
+   * @param sendFunction Function to call to send audio data to the blockchain
+   * @param metricsCallback Optional callback for metrics updates
    */
-  public async start(callback: (buffer: EncodedAudioBuffer) => void): Promise<void> {
+  public async start(
+    sendFunction: (buffer: EncodedAudioBuffer) => Promise<any>,
+    metricsCallback?: (metrics: AudioMetrics) => void
+  ): Promise<void> {
     if (this.isRecording) return;
     
     try {
-      this.callback = callback;
+      this.sendFunction = sendFunction;
+      this.metricsCallback = metricsCallback || null;
+      
+      // Reset state
+      this.frameQueue = [];
+      this.totalBatchesSent = 0;
+      this.totalBytesTransmitted = 0;
+      this.lastLatency = 0;
       
       // Get microphone access
       this.mediaStream = await navigator.mediaDevices.getUserMedia({
@@ -57,10 +93,10 @@ export class OpusEncoder {
         latencyHint: 'interactive',
       });
       
-      // Use MediaRecorder instead of AudioWorklet for better compatibility
+      // Use MediaRecorder with PCM for higher quality 
       this.mediaRecorder = new MediaRecorder(this.mediaStream, {
         mimeType: 'audio/webm;codecs=pcm',
-        audioBitsPerSecond: SAMPLE_RATE, // Opus typically works well at 24kbps for voice
+        audioBitsPerSecond: SAMPLE_RATE, 
       });
       
       // Collect data as it becomes available
@@ -77,13 +113,18 @@ export class OpusEncoder {
       // Start recording with small timeslices to get frequent data
       this.mediaRecorder.start(100);
       
-      // Set up processing interval to send frames regularly
+      // Set up audio processing interval
       this.processingInterval = window.setInterval(() => {
         this.processAudioChunks();
       }, this.frameInterval);
       
+      // Set up batching interval to send frames every 30ms
+      this.batchingInterval = window.setInterval(() => {
+        this.flushFrameQueue();
+      }, this.batchInterval);
+      
       this.isRecording = true;
-      console.log('Recording started');
+      console.log('Recording started with batching every 30ms');
     } catch (error) {
       console.error('Error starting encoder:', error);
       throw error;
@@ -92,9 +133,10 @@ export class OpusEncoder {
   
   /**
    * Process collected audio chunks into fixed-size frames
+   * and add them to the frame queue
    */
   private processAudioChunks(): void {
-    if (!this.isRecording || !this.callback || this.audioChunks.length === 0) return;
+    if (!this.isRecording || !this.sendFunction || this.audioChunks.length === 0) return;
     
     // Combine all chunks into one buffer
     let totalLength = 0;
@@ -119,11 +161,57 @@ export class OpusEncoder {
     for (let i = 0; i < numFrames; i++) {
       const frameData = combinedData.slice(i * this.frameSize, (i + 1) * this.frameSize);
       
-      // Send frame to callback
-      this.callback({
+      // Add frame to queue instead of sending immediately
+      this.frameQueue.push({
         sequence: this.sequence++,
         data: frameData
       });
+    }
+  }
+  
+  /**
+   * Flush the frame queue by sending the oldest frame to the blockchain
+   * This is called at regular intervals (every 30ms)
+   */
+  private async flushFrameQueue(): Promise<void> {
+    if (!this.isRecording || !this.sendFunction || this.frameQueue.length === 0) return;
+    
+    // Get the first (oldest) frame from the queue
+    const frame = this.frameQueue.shift();
+    
+    if (frame) {
+      try {
+        // Measure transaction time
+        const startTime = Date.now();
+        
+        // Send the frame to the blockchain
+        const result = await this.sendFunction(frame);
+        
+        // Calculate transaction latency
+        const endTime = Date.now();
+        this.lastLatency = endTime - startTime;
+        
+        // Update metrics
+        this.totalBatchesSent++;
+        this.totalBytesTransmitted += frame.data.length;
+        
+        // Report metrics if callback is provided
+        if (this.metricsCallback) {
+          this.metricsCallback({
+            batchesSent: this.totalBatchesSent,
+            bytesTransmitted: this.totalBytesTransmitted,
+            lastLatency: this.lastLatency
+          });
+        }
+        
+        // Log success (for debugging)
+        console.debug(`Sent frame ${frame.sequence} to blockchain, latency: ${this.lastLatency}ms, queue: ${this.frameQueue.length}`);
+        
+        return result;
+      } catch (error) {
+        console.error(`Error sending frame ${frame.sequence}:`, error);
+        throw error;
+      }
     }
   }
   
@@ -133,10 +221,15 @@ export class OpusEncoder {
   public stop(): void {
     if (!this.isRecording) return;
     
-    // Stop the processing interval
+    // Stop the processing intervals
     if (this.processingInterval !== null) {
       window.clearInterval(this.processingInterval);
       this.processingInterval = null;
+    }
+    
+    if (this.batchingInterval !== null) {
+      window.clearInterval(this.batchingInterval);
+      this.batchingInterval = null;
     }
     
     // Stop the media recorder
@@ -156,9 +249,24 @@ export class OpusEncoder {
       this.audioContext = null;
     }
     
+    // Clear any remaining frames in the queue
+    this.frameQueue = [];
+    
     this.isRecording = false;
-    this.callback = null;
+    this.sendFunction = null;
+    this.metricsCallback = null;
     console.log('Recording stopped');
+  }
+  
+  /**
+   * Get metrics
+   */
+  public getMetrics(): AudioMetrics {
+    return {
+      batchesSent: this.totalBatchesSent,
+      bytesTransmitted: this.totalBytesTransmitted,
+      lastLatency: this.lastLatency
+    };
   }
 }
 

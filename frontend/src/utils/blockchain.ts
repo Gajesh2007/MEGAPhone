@@ -20,7 +20,7 @@ import { abi as OnchainBroadcastAbi } from './OnchainBroadcast.abi';
 
 const USE_WSS = false; // Using HTTP instead since WebSocket endpoints are currently broken
 
-export const MEGA_ETH_WSS = 'wss://carrot.megaeth.com/mafia/ws/20vd3cbmv2iwxxyi5x8kzef063q1ncjegg0ei27u';
+export const MEGA_ETH_WSS = 'https://carrot.megaeth.com/mafia/ws/1f81b9d19ac74804b41085bc1018be8ea5d9c6e8';
 export const DEFAULT_TRANSPORT = USE_WSS ? webSocket(MEGA_ETH_WSS) : http('https://carrot.megaeth.com/mafia/rpc/20vd3cbmv2iwxxyi5x8kzef063q1ncjegg0ei27u');
 
 // Contract address
@@ -28,7 +28,7 @@ export const CONTRACT_ADDRESS = '0xF2A6dA0098eEa4A62802BB87A5447C987a39B5b9' as 
 
 // Create a local wallet client for broadcasting
 // Stores the private key in localStorage for persistent identity
-export function createLocalWalletClient(): { walletClient: WalletClient; account: Account } {
+export function createLocalWalletClient(): WalletClient {
   // Get private key from local storage or generate a new one
   let privateKey = localStorage.getItem('megaphone_private_key');
   if (!privateKey) {
@@ -46,8 +46,21 @@ export function createLocalWalletClient(): { walletClient: WalletClient; account
     transport: DEFAULT_TRANSPORT
   });
   
-  return { walletClient, account };
+  return walletClient;
 }
+
+const client = createPublicClient({
+  chain: megaethTestnet,
+  transport: DEFAULT_TRANSPORT
+});
+
+const contract = getContract({
+  abi: OnchainBroadcastAbi,
+  address: CONTRACT_ADDRESS,
+  client: client,
+});
+
+
 
 // Transaction performance metrics
 interface TransactionMetrics {
@@ -189,6 +202,7 @@ export async function getAccountBalance(address: string): Promise<string> {
   }
 }
 
+
 /**
  * Listen to audio batches for a specific channel
  * Note: This implementation now uses polling rather than WebSockets due to WebSocket endpoints being broken
@@ -205,17 +219,6 @@ export async function listenToAudioBatches(
   }) => void
 ): Promise<() => void> {
   try {
-    const client = createPublicClient({
-      chain: megaethTestnet,
-      transport: DEFAULT_TRANSPORT
-    });
-    
-    const contract = getContract({
-      abi: OnchainBroadcastAbi,
-      address: CONTRACT_ADDRESS,
-      client: client,
-    });
-
     const channelId = keccak256(stringToHex(_channelId));
 
     console.log(`Listening on channel: ${channelId}`);

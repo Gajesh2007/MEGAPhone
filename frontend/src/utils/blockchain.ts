@@ -18,10 +18,10 @@ import { generatePrivateKey } from 'viem/accounts';
 import { megaethTestnet } from 'viem/chains';
 import { abi as OnchainBroadcastAbi } from './OnchainBroadcast.abi';
 
-const USE_WSS = false; // Using HTTP instead since WebSocket endpoints are currently broken
+export const MEGA_ETH_WSS = 'ws://localhost:3001';
 
-export const MEGA_ETH_WSS = 'https://carrot.megaeth.com/mafia/ws/1f81b9d19ac74804b41085bc1018be8ea5d9c6e8';
-export const DEFAULT_TRANSPORT = USE_WSS ? webSocket(MEGA_ETH_WSS) : http('https://carrot.megaeth.com/mafia/rpc/20vd3cbmv2iwxxyi5x8kzef063q1ncjegg0ei27u');
+export const DEFAULT_TRANSPORT =  webSocket(MEGA_ETH_WSS);
+export const WRITE_TRANSPORT = http('https://carrot.megaeth.com/mafia/rpc/20vd3cbmv2iwxxyi5x8kzef063q1ncjegg0ei27u');
 
 // Contract address
 export const CONTRACT_ADDRESS = '0xF2A6dA0098eEa4A62802BB87A5447C987a39B5b9' as const;
@@ -43,7 +43,7 @@ export function createLocalWalletClient(): WalletClient {
   const walletClient = createWalletClient({
     account,
     chain: megaethTestnet,
-    transport: DEFAULT_TRANSPORT
+    transport: WRITE_TRANSPORT
   });
   
   return walletClient;
@@ -98,7 +98,7 @@ export async function sendAudioBatch(
   nonce: number,
   seqStart: number,
   frames: Uint8Array
-): Promise<{ hash: string; receipt?: any }> {
+): Promise<void> {
   try {
     // Start timing for transaction creation
     const creationStart = performance.now();
@@ -132,9 +132,6 @@ export async function sendAudioBatch(
     const signedTx = await walletClient.account.signTransaction!(transactionRequest);
     const signedAt = performance.now();
     
-    // Create hash from signed transaction
-    let hash: `0x${string}`;
-    
     // Track this transaction for metrics
     const txMetrics = {
       creationTime: signedAt - creationStart,
@@ -143,39 +140,32 @@ export async function sendAudioBatch(
     };
     
     try {
-      // Use realtime_sendRawTransaction to get receipt directly without polling
-      const publicClient = createPublicClient({
-        chain: megaethTestnet,
-        transport: DEFAULT_TRANSPORT,
-      });
+      // TODO: Use realtime_sendRawTransaction to get receipt directly without polling
+      // const publicClient = createPublicClient({
+      //   chain: megaethTestnet,
+      //   transport: DEFAULT_TRANSPORT,
+      // });
       
       // Send the transaction using realtime_sendRawTransaction
       const startSubmit = performance.now();
       
-      // Use custom transport request to call the realtime method
-      const receipt = await publicClient.request({
-        // @ts-expect-error 'unknown method'
-        method: 'realtime_sendRawTransaction',
-        params: [signedTx]
-      }) as {transactionHash: `0x${string}`} | undefined;
-      const endSubmit = performance.now();
-      
-      // Extract hash from receipt
-      hash = receipt?.transactionHash as `0x${string}`;
-      
-      // Update metrics
-      txMetrics.submissionTime = endSubmit - startSubmit;
-      txMetrics.totalTime = endSubmit - creationStart;
-      transactionMetrics[hash] = txMetrics;
-      
-      // console.log(`Transaction confirmed in ${Math.round(txMetrics.submissionTime)}ms with hash: ${hash.slice(0, 10)}...`);
-      
-      return { hash, receipt };
-    } catch (error: any) {
+      // TODO: revert back to `realtime_sendRawTransaction` when available.
+      walletClient.sendRawTransaction({
+        serializedTransaction: signedTx
+      }).then((hash) => {
+        const endSubmit = performance.now();
+        txMetrics.submissionTime = endSubmit - startSubmit;
+        txMetrics.totalTime = endSubmit - creationStart;
+        transactionMetrics[hash] = txMetrics;
+        console.log(`submitted transaction for batch (${seqStart}) - [${hash}]`);
+      }).catch(err => {
+        console.error(`error submitting transaction for batch (${seqStart})`, err);
+      })
+    } catch (error) {
       console.error(`realtime_sendRawTransaction failed(${nonce}):`, error);
       
       // Re-throw the error since we're no longer using fallback
-      throw new Error(`Failed to send transaction via realtime API: ${error?.message || 'Unknown error'}`);
+      throw new Error(`Failed to send transaction via realtime API: ${(error as Error)?.message || 'Unknown error'}`);
     }
   } catch (error) {
     console.error('Error sending audio batch:', error);
@@ -226,7 +216,6 @@ export async function listenToAudioBatches(
     const cancelLogs = contract.watchEvent.Batch({
       channelId
     }, {pollingInterval: 20, onLogs: (logs) => {
-      console.log(`Got ${logs.length} frames.`);
       logs.forEach(log => {
         const seqStart = Number(log.args.seqStart);
         const count = Number(log.args.count);

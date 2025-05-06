@@ -104,8 +104,8 @@ const Broadcaster: React.FC = () => {
       );
       
       // Update status message
-      const hashString = result.hash || 'unknown-hash';
-      setStatusMessage(`Batch ${buffer.sequence} sent: ${hashString.slice(0, 6)}...${hashString.slice(-4)}`);
+      // const hashString = result.hash || 'unknown-hash';
+      setStatusMessage(`Batch ${buffer.sequence} sent.`);
       
       return result;
     } catch (error) {

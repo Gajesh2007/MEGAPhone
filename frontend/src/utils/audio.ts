@@ -381,6 +381,7 @@ export class AudioPlayer {
    * @param payload Raw audio data
    */
   public processBatch(seqStart: number, count: number, payload: Uint8Array): void {
+    console.error(`Processing batch[${seqStart}]`);
     if (!this.isPlaying || !payload || payload.length === 0) return;
 
     try {
@@ -501,21 +502,6 @@ export class AudioPlayer {
       // Remove the frame from our buffer and advance sequence
       this.frameMap.delete(this.expectedSequence);
       this.expectedSequence++;
-    }
-    
-    // Handle packet loss: if we have frames ahead but missed some in between
-    const nextSeq = availableSeqs.find(seq => seq > this.expectedSequence);
-    if (nextSeq && nextSeq > this.expectedSequence) {
-      // We missed some frames, count them as lost
-      const missedCount = nextSeq - this.expectedSequence;
-      this.packetsLost += missedCount;
-      
-      // For better audio continuity, we could insert "comfort noise" frames
-      // here in a full implementation, but for now we'll just advance
-      console.debug(`Missed ${missedCount} frames, skipping to sequence ${nextSeq}`);
-      
-      // Jump to the next available sequence
-      this.expectedSequence = nextSeq;
     }
     
     // Clean up old frames (more than 2 seconds old)
